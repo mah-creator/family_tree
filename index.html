@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <title>المشجرة العائلية المصورة — Arabic Family Tree Viewer</title>
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Fixed Ornate Frame & Corner Cartouches Overlay -->
+    <div class="ornate-frame-overlay">
+      <div class="cartouche cartouche-top-right">ما شاء الله لا قوة إلا بالله</div>
+      <div class="cartouche cartouche-top-left">تبارك الله أحسن الخالقين</div>
+    </div>
+
+    <!-- Floating Glassmorphism Search Panel -->
+    <div class="ui-panel-overlay">
+      <div class="search-box-wrapper">
+        <input type="text" id="search-input" class="search-input" placeholder="ابحث عن اسم في المشجرة (مثال: عبدالله، حسن، bq...)" autocomplete="off">
+      </div>
+      <div id="search-results" class="search-results-dropdown"></div>
+    </div>
+
+    <!-- Floating Controls & Profiler Widget -->
+    <div class="controls-widget">
+      <button id="btn-single-limb" class="control-btn" style="border-color: #2D6A4F; font-weight: 700;">عرض الشجرة كاملة (181 أصل)</button>
+      <button id="btn-benchmark" class="control-btn">اختبار 2000 أصل (Stress Test)</button>
+      <button id="btn-reset-cam" class="control-btn">إعادة الضبط</button>
+      <button id="btn-profiler" class="control-btn">تقرير الأداء (Profiler)</button>
+    </div>
+
+    <!-- Performance Profiler Card -->
+    <div id="profiler-card" class="profiler-card">
+      <div style="font-weight: 700; margin-bottom: 8px; border-bottom: 1px solid var(--gold-primary); padding-bottom: 4px;">
+        📊 تقرير أداء العرض (Browser Profiler)
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+        <span>عدد العقد الكلي:</span>
+        <strong id="prof-node-count">181</strong>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+        <span>العقد المرئية (Viewport):</span>
+        <strong id="prof-visible-count">181</strong>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+        <span>أقصى زمن إطار (Max Frame):</span>
+        <strong id="prof-max-frame" style="color: #52B788;">11.2 ms (89 FPS)</strong>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+        <span>نصوص LOD مفعّلة:</span>
+        <strong id="prof-text-lod">نعم</strong>
+      </div>
+      <div style="display: flex; justify-content: space-between;">
+        <span>حركة الأوراق (Sway):</span>
+        <strong id="prof-sway-status">مفعلة</strong>
+      </div>
+    </div>
+
+    <!-- SVG Canvas -->
+    <svg id="tree-svg">
+      <defs>
+        <!-- Trunk Oval Gold Gradient -->
+        <linearGradient id="goldTrunkGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#FFF3C4" />
+          <stop offset="50%" stop-color="#F2CB6E" />
+          <stop offset="100%" stop-color="#C59332" />
+        </linearGradient>
+
+        <!-- Founder Medallion Gold Gradient -->
+        <radialGradient id="goldFounderGradient" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#FFF8DF" />
+          <stop offset="65%" stop-color="#E5B242" />
+          <stop offset="100%" stop-color="#9A6F19" />
+        </radialGradient>
+
+        <!-- Standard Emerald Leaf Gradient -->
+        <linearGradient id="emeraldLeafGradient" x1="0%" y1="0%" x2="100%" y2="50%">
+          <stop offset="0%" stop-color="#52B788" />
+          <stop offset="60%" stop-color="#2D6A4F" />
+          <stop offset="100%" stop-color="#1B4332" />
+        </linearGradient>
+
+        <!-- Distinguished Gold Leaf Gradient -->
+        <linearGradient id="goldLeafGradient" x1="0%" y1="0%" x2="100%" y2="50%">
+          <stop offset="0%" stop-color="#FFEAA7" />
+          <stop offset="60%" stop-color="#D4AC0D" />
+          <stop offset="100%" stop-color="#7D6608" />
+        </linearGradient>
+
+        <!-- Wood Limb Gradient -->
+        <linearGradient id="woodLimbGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#7A5230" />
+          <stop offset="50%" stop-color="#4A2E19" />
+          <stop offset="100%" stop-color="#2D1A0E" />
+        </linearGradient>
+      </defs>
+
+      <g id="tree-zoom-container">
+        <!-- Branches Layer -->
+        <g id="branches-layer"></g>
+        <!-- Nodes Layer -->
+        <g id="nodes-layer"></g>
+      </g>
+    </svg>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

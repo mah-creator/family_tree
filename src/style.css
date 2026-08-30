@@ -1,0 +1,284 @@
+@import './fontEmbedded.css';
+
+:root {
+  --font-arabic: 'Noto Kufi Arabic', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --bg-parchment: #F9F4E8;
+  --bg-parchment-dark: #F2E9D4;
+  --gold-primary: #C5A059;
+  --gold-light: #F7E7AD;
+  --gold-dark: #8C6A27;
+  --emerald-primary: #2D6A4F;
+  --emerald-light: #52B788;
+  --wood-dark: #4A2E19;
+  --wood-light: #7A5230;
+  --border-red: #A32A2A;
+  --text-dark: #2B1E17;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-arabic);
+  direction: rtl;
+  background-color: var(--bg-parchment);
+  color: var(--text-dark);
+}
+
+/* App Container */
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: radial-gradient(circle at center, #FDFBF7 0%, #F5ECCF 70%, #E8D9B5 100%);
+}
+
+/* Fixed Ornate Frame & Corner Cartouches Overlay (Does NOT scale with zoom) */
+.ornate-frame-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: inset 0 0 40px rgba(74, 46, 25, 0.25);
+  border: 12px solid #8C6A27;
+  outline: 3px solid #A32A2A;
+  outline-offset: -15px;
+}
+
+.cartouche {
+  position: absolute;
+  padding: 6px 18px;
+  background: linear-gradient(135deg, #A32A2A 0%, #6E1B1B 100%);
+  border: 2px solid #F7E7AD;
+  border-radius: 20px;
+  color: #FFF8DF;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  pointer-events: auto;
+}
+
+.cartouche-top-right {
+  top: 24px;
+  right: 24px;
+}
+
+.cartouche-top-left {
+  top: 24px;
+  left: 24px;
+}
+
+/* Floating Glassmorphism Search Panel */
+.ui-panel-overlay {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  width: 90%;
+  max-width: 480px;
+  pointer-events: auto;
+}
+
+.search-box-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: rgba(253, 251, 247, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1.5px solid var(--gold-primary);
+  border-radius: 28px;
+  padding: 6px 16px;
+  box-shadow: 0 8px 32px rgba(74, 46, 25, 0.18);
+}
+
+.search-input {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--font-arabic);
+  font-size: 15px;
+  color: var(--text-dark);
+  padding: 8px 10px;
+  direction: rtl;
+}
+
+.search-results-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+  background: rgba(253, 251, 247, 0.96);
+  backdrop-filter: blur(16px);
+  border: 1.5px solid var(--gold-primary);
+  border-radius: 16px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25);
+  display: none;
+  z-index: 250;
+}
+
+.search-results-dropdown.active {
+  display: block;
+}
+
+.search-result-item {
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(197, 160, 89, 0.2);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.search-result-item:hover {
+  background: rgba(197, 160, 89, 0.18);
+}
+
+.search-result-name {
+  font-weight: 700;
+  font-size: 14.5px;
+  color: var(--text-dark);
+}
+
+.search-result-lineage {
+  font-size: 12px;
+  color: #6A5242;
+  margin-top: 2px;
+}
+
+/* Floating Controls & Profiler Widget */
+.controls-widget {
+  position: absolute;
+  bottom: 24px;
+  right: 24px;
+  z-index: 200;
+  display: flex;
+  gap: 10px;
+}
+
+.control-btn {
+  background: rgba(253, 251, 247, 0.92);
+  border: 1.5px solid var(--gold-primary);
+  border-radius: 12px;
+  padding: 8px 14px;
+  font-family: var(--font-arabic);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dark);
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transition: all 0.2s ease;
+}
+
+.control-btn:hover {
+  background: var(--gold-primary);
+  color: #FFF;
+}
+
+/* Performance Profiler Modal Overlay */
+.profiler-card {
+  position: absolute;
+  bottom: 70px;
+  right: 24px;
+  width: 320px;
+  background: rgba(20, 15, 10, 0.92);
+  color: #F7E7AD;
+  border: 1px solid var(--gold-primary);
+  border-radius: 14px;
+  padding: 14px 18px;
+  font-size: 12.5px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  z-index: 210;
+  display: none;
+}
+
+.profiler-card.active {
+  display: block;
+}
+
+/* SVG Tree Canvas */
+#tree-svg {
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+#tree-svg:active {
+  cursor: grabbing;
+}
+
+/* Trunk Oval Nodes */
+.trunk-oval {
+  fill: url(#goldTrunkGradient);
+  stroke: #8C6A27;
+  stroke-width: 2.5px;
+  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.25));
+}
+
+.trunk-text-name {
+  font-weight: 800;
+  font-size: 16px;
+  fill: #3D2800;
+}
+
+.trunk-text-bio {
+  font-weight: 500;
+  font-size: 10.5px;
+  fill: #5E410A;
+}
+
+/* Sub-family Founder Nodes */
+.founder-circle {
+  fill: url(#goldFounderGradient);
+  stroke: #A32A2A;
+  stroke-width: 2px;
+  filter: drop-shadow(0 3px 6px rgba(163, 42, 42, 0.35));
+}
+
+.founder-text {
+  font-weight: 700;
+  font-size: 11.5px;
+  fill: #4A0E0E;
+}
+
+/* Leaf Sway Animation (Correction #4: Gated) */
+.leaf-sway {
+  transform-origin: 0px 0px;
+  animation: leafSway 4s ease-in-out infinite alternate;
+}
+
+@keyframes leafSway {
+  0% { transform: rotate(0deg); }
+  50% { transform: rotate(2.5deg); }
+  100% { transform: rotate(-2.5deg); }
+}
+
+/* Branch & Leaf Growth Animations */
+@keyframes branchDraw {
+  0% { stroke-dashoffset: 1000; opacity: 0; }
+  100% { stroke-dashoffset: 0; opacity: 1; }
+}
+
+@keyframes leafAppear {
+  0% { opacity: 0; transform: scale(0.2); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes nodePop {
+  0% { opacity: 0; transform: scale(0.5); }
+  100% { opacity: 1; transform: scale(1); }
+}
