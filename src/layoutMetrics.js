@@ -24,7 +24,7 @@ function bezierPoint(p0, p1, p2, p3, t) {
 }
 
 export function computeLayoutMetrics(layoutResult) {
-  const { root, R_min, baseCanopyRadius, layoutOpts, attachments } = layoutResult;
+  const { root, R_min, baseCanopyRadius, layoutOpts, attachments, orderedTwigs, N } = layoutResult;
   const { trunkBaseY, trunkCenterX } = layoutOpts;
   const descendants = root.descendants();
 
@@ -135,8 +135,22 @@ export function computeLayoutMetrics(layoutResult) {
     return total ? +(100 * filled / total).toFixed(1) : 0;
   };
 
+  // ---------- 4. Twig-cluster spacing ----------
+  // Minimum along-twig spacing actually achieved across every multi-member
+  // twig (computed by applyTwigMemberSampling in treeLayout.js). Must stay
+  // >= 40px per the twig-length/t-spread design; report null if no twig has
+  // more than one member yet.
+  const multiMemberSpacings = (orderedTwigs || [])
+    .map(t => t.minMemberSpacing)
+    .filter(v => v != null && isFinite(v));
+  const minTwigMemberSpacingPx = multiMemberSpacings.length
+    ? Math.round(Math.min(...multiMemberSpacings) * 10) / 10
+    : null;
+
   return {
     totalLeaves: leaves.length,
+    twigCount: N,
+    minTwigMemberSpacingPx,
     leafPairCollisions,
     branchPairCollisions: collidingPairKeys.size,
     R_min,

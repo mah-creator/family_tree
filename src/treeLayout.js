@@ -42,25 +42,89 @@ export function computeSubtreeSizes(root) {
   });
 }
 
+// Leaf-cluster ("twig") geometry constants. A twig is the shared branch a
+// group of up to 3 sibling leaves grows off of, sampled at these t-fractions
+// along the twig's own finished Bézier spine (see collectOrderedTwigs and
+// applyTwigMemberSampling).
+const TWIG_T_BY_COUNT = { 1: [1.0], 2: [0.7, 1.0], 3: [0.45, 0.72, 1.0] };
+const TWIG_MIN_SPACING_PX = 40;
+const TWIG_LEAF_HEIGHT_PX = 22;
+
+function minConsecutiveDiff(arr) {
+  let min = Infinity;
+  for (let i = 1; i < arr.length; i++) min = Math.min(min, arr[i] - arr[i - 1]);
+  return min;
+}
+
+function balancedChunks(arr, maxSize) {
+  const n = arr.length;
+  if (n === 0) return [];
+  const numChunks = Math.ceil(n / maxSize);
+  const base = Math.floor(n / numChunks);
+  const remainder = n % numChunks;
+  const chunks = [];
+  let idx = 0;
+  for (let c = 0; c < numChunks; c++) {
+    const size = base + (c < remainder ? 1 : 0);
+    chunks.push(arr.slice(idx, idx + size));
+    idx += size;
+  }
+  return chunks;
+}
+
 /**
- * In-Order Traversal (Right-to-Left for RTL) to collect all leaves in order.
+ * In-Order Traversal (Right-to-Left for RTL) to collect all leaves in order,
+ * AND to group each parent's leaf children into "twigs" of up to 3 — a
+ * shared branch that a small cluster of sibling leaves grows off of, matching
+ * the reference poster's leaf clusters rather than one branch per leaf.
  * Subtrees occupy strictly contiguous index intervals, making crossings impossible.
  */
-export function collectOrderedLeaves(root) {
+export function collectOrderedTwigs(root) {
   const leaves = [];
+  const twigs = [];
+
+  function flushPool(pool, parent) {
+    if (pool.length === 0) return;
+    balancedChunks(pool, 3).forEach(chunk => {
+      const representative = chunk[chunk.length - 1];
+      const twig = { id: representative.data.id, parent, members: chunk, representative };
+      chunk.forEach((m, i) => {
+        m.twigGroup = twig;
+        m.twigMemberIndex = i;
+        m.clusterId = twig.id;
+      });
+      twigs.push(twig);
+    });
+  }
+
   function traverse(node) {
     if (!node.children || node.children.length === 0) {
       node.leafIndex = leaves.length;
       leaves.push(node);
       return;
     }
-    // Sibling order: Right to Left (first child on right, last on left)
+    // Sibling order: Right to Left (first child on right, last on left).
+    // Leaf children are pooled and chunked into twigs; non-leaf children are
+    // recursed into normally (flushing whatever leaf pool preceded them, so
+    // an interleaved non-leaf sibling never merges leaves from both sides
+    // of it into one twig).
+    let pool = [];
     for (let i = 0; i < node.children.length; i++) {
-      traverse(node.children[i]);
+      const child = node.children[i];
+      if (!child.children || child.children.length === 0) {
+        child.leafIndex = leaves.length;
+        leaves.push(child);
+        pool.push(child);
+      } else {
+        flushPool(pool, node);
+        pool = [];
+        traverse(child);
+      }
     }
+    flushPool(pool, node);
   }
   traverse(root);
-  return leaves;
+  return { leaves, twigs };
 }
 
 /**
@@ -105,9 +169,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const root = stratify(personList);
   computeSubtreeSizes(root);
 
-  // 2. Part A - Step 1: Collect Ordered Leaves (Right-to-Left for RTL)
-  const orderedLeaves = collectOrderedLeaves(root);
-  const N = orderedLeaves.length || 1;
+  // 2. Part A - Step 1: Collect Ordered Leaves & group them into twigs
+  // (clusters of up to 3 sibling leaves sharing one branch — see collectOrderedTwigs)
+  const { leaves: orderedLeaves, twigs: orderedTwigs } = collectOrderedTwigs(root);
+  const N = orderedTwigs.length || 1;
 
   // 3. Part A - Step 3 & 4: Arc Allocation & R_min Calculation
   // Fix 2: widened to 230° (was 155°) so outer edges reach ~25° past horizontal on
@@ -117,14 +182,20 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const rightmostAngle = -Math.PI / 2 + sectorWidthRad / 2; // Right side start (~25 deg, past horizontal)
   const leftmostAngle = -Math.PI / 2 - sectorWidthRad / 2;  // Left side end (~-205 deg, past horizontal)
 
-  // R_min = 34 * N / (3 * sectorWidth * 0.74)
-  const R_min = (34 * N) / (3 * sectorWidthRad * 0.74);
+  // R_min = 52 * N / (3 * sectorWidth * 0.74). N is now twig count, not leaf
+  // count — a twig with alternating clustered members is wider than one leaf
+  // (leaf height 23px + up to ~2x the nudge), so the clearance term is 52,
+  // not 34, or angular slots would be spaced for a single leaf and quietly
+  // collide once clusters exist.
+  const R_min = (52 * N) / (3 * sectorWidthRad * 0.74);
   const baseCanopyRadius = Math.max(R_min / 0.74 + 180, 1150);
 
-  // 4. Part A - Step 2 & 3: Place Leaves by Index into 3 Radial Bands with Irregular Silhouette
+  // 4. Part A - Step 2 & 3: Place Twigs by Index into 3 Radial Bands with Irregular Silhouette
   const radialBands = [0.74, 0.94, 1.14];
 
-  orderedLeaves.forEach((leafNode, idx) => {
+  orderedTwigs.forEach((twig, idx) => {
+    const repNode = twig.representative;
+
     // Exact angular position across the sector (Right to Left)
     const t = (idx + 0.5) / N;
     const baseAngle = rightmostAngle - t * sectorWidthRad;
@@ -138,12 +209,17 @@ export function buildBotanicalLayout(treeData, options = {}) {
     const bandMultiplier = radialBands[band];
 
     // Part A - Step 6: Organic ±12% length jitter seeded off node id
-    const jitter = (seedHash(leafNode.data.id + '_rad') - 0.5) * 0.24; // ±12%
+    const jitter = (seedHash(repNode.data.id + '_rad') - 0.5) * 0.24; // ±12%
     const leafRadius = effectiveRadius * bandMultiplier * (1 + jitter);
 
-    leafNode.targetAngle = baseAngle;
-    leafNode.targetRadius = leafRadius;
+    repNode.targetAngle = baseAngle;
+    repNode.targetRadius = leafRadius;
     // World coordinates computed later from the owning limb's origin (Fix 1)
+
+    // Other twig members share the representative's angle (needed by the
+    // ancestor angle-averaging pass below); their own position comes later
+    // from sampling the representative's finished spine, not polar radius.
+    twig.members.forEach(m => { if (m !== repNode) m.targetAngle = baseAngle; });
   });
 
   // 5. Part A - Step 5: Internal node ANGLES follow children (bottom-up mean)
@@ -186,6 +262,12 @@ export function buildBotanicalLayout(treeData, options = {}) {
       return;
     }
 
+    if (node.twigGroup && node.twigGroup.representative !== node) {
+      // Non-representative twig member: positioned later by
+      // applyTwigMemberSampling, from the representative's finished spine.
+      return;
+    }
+
     const isTrunk = !!node.data.isTrunkLineage;
 
     // Depth-1 limbs got their own origin in assignLimbAttachments; descendants inherit it
@@ -205,9 +287,64 @@ export function buildBotanicalLayout(treeData, options = {}) {
     const originLead = origin ? rootTrunkLength * (1 - origin.frac) : rootTrunkLength;
 
     if (!node.children || node.children.length === 0) {
-      // Terminal leaf: polar placement around the owning limb origin
-      node.x3 = cx + Math.cos(node.targetAngle) * node.targetRadius * 1.05;
-      node.y3 = cy + Math.sin(node.targetAngle) * node.targetRadius * 0.85;
+      // Terminal leaf (twig representative): polar placement around the
+      // owning limb origin
+      let x3 = cx + Math.cos(node.targetAngle) * node.targetRadius * 1.05;
+      let y3 = cy + Math.sin(node.targetAngle) * node.targetRadius * 0.85;
+
+      // Cluster fix: scale the twig's own length (parent tip -> this node)
+      // with member count, so a multi-leaf cluster has room along the spine.
+      // One member keeps today's natural length (scale 1); three members get
+      // ~1.7x. Also enforce the 40px along-twig spacing floor analytically —
+      // if the natural length is too short for the widened t-spread to clear
+      // 40px between adjacent members, extend it (with a 10% safety margin
+      // for chord-vs-arc-length approximation on the S-curve).
+      const twig = node.twigGroup;
+      if (twig && twig.representative === node) {
+        const px = node.parent.x3, py = node.parent.y3;
+        const naturalDx = x3 - px, naturalDy = y3 - py;
+        const naturalLen = Math.hypot(naturalDx, naturalDy);
+
+        // The "natural" parent->leaf vector can be degenerately short (the
+        // leaf's own polar radius and the parent's depth-based radius can
+        // nearly coincide for some nodes — a rough edge of the pre-existing
+        // radius formulas, not something this fix should amplify). Below a
+        // floor, both its length AND its direction are unreliable, so fall
+        // back to a stable direction (targetAngle, same aspect convention
+        // used above) and a stable minimum base length instead of scaling a
+        // near-zero vector — a small naturalLen otherwise turns into a huge
+        // multiplier and catapults the branch far outside the canopy.
+        const MIN_BASE_LEN = 60;
+        let dirX, dirY, baseLen;
+        if (naturalLen < MIN_BASE_LEN) {
+          const rawX = Math.cos(node.targetAngle) * 1.05;
+          const rawY = Math.sin(node.targetAngle) * 0.85;
+          const rawLen = Math.hypot(rawX, rawY) || 1;
+          dirX = rawX / rawLen;
+          dirY = rawY / rawLen;
+          baseLen = MIN_BASE_LEN;
+        } else {
+          dirX = naturalDx / naturalLen;
+          dirY = naturalDy / naturalLen;
+          baseLen = naturalLen;
+        }
+
+        const memberCount = twig.members.length;
+        let scale = 1 + 0.35 * (memberCount - 1);
+
+        if (memberCount > 1) {
+          const tValues = TWIG_T_BY_COUNT[memberCount] || TWIG_T_BY_COUNT[3];
+          const minTGap = minConsecutiveDiff(tValues);
+          const requiredLen = (TWIG_MIN_SPACING_PX / minTGap) * 1.1;
+          if (baseLen * scale < requiredLen) scale = requiredLen / baseLen;
+        }
+
+        x3 = px + dirX * baseLen * scale;
+        y3 = py + dirY * baseLen * scale;
+      }
+
+      node.x3 = x3;
+      node.y3 = y3;
       if (node.y3 > trunkBaseY - 100) node.y3 = trunkBaseY - 100;
       return;
     }
@@ -230,6 +367,12 @@ export function buildBotanicalLayout(treeData, options = {}) {
   root.eachBefore(node => {
     if (node === root) {
       computeTrunkSpineGeometry(node);
+      return;
+    }
+
+    if (node.twigGroup && node.twigGroup.representative !== node) {
+      // No branch of its own — the twig's one physical branch belongs to
+      // the representative; this member is anchored by applyTwigMemberSampling.
       return;
     }
 
@@ -263,12 +406,17 @@ export function buildBotanicalLayout(treeData, options = {}) {
     computeSCurveSpineGeometry(node, startTangent);
   });
 
+  // 7. Cluster fix: position non-representative twig members by sampling
+  // each twig's now-finished spine (must run after the geometry pass above)
+  applyTwigMemberSampling(orderedTwigs, trunkBaseY - 100);
+
   return {
     root,
     personMap,
     rootId,
     maxDepth,
     orderedLeaves,
+    orderedTwigs,
     N,
     R_min: Math.round(R_min),
     baseCanopyRadius: Math.round(baseCanopyRadius),
@@ -278,6 +426,92 @@ export function buildBotanicalLayout(treeData, options = {}) {
     sector: { rightmostAngle, leftmostAngle, sectorSpanDeg },
     layoutOpts: { width, height, trunkBaseY, trunkCenterX, rootTrunkLength, rootBaseWidth }
   };
+}
+
+/**
+ * Cluster fix: samples a cubic Bézier at parameter t, returning both the
+ * point and the tangent angle (derivative direction) there.
+ */
+function sampleCubicBezier(p0, p1, p2, p3, t) {
+  const mt = 1 - t;
+  const x = mt * mt * mt * p0.x + 3 * mt * mt * t * p1.x + 3 * mt * t * t * p2.x + t * t * t * p3.x;
+  const y = mt * mt * mt * p0.y + 3 * mt * mt * t * p1.y + 3 * mt * t * t * p2.y + t * t * t * p3.y;
+  const dx = 3 * mt * mt * (p1.x - p0.x) + 6 * mt * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x);
+  const dy = 3 * mt * mt * (p1.y - p0.y) + 6 * mt * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y);
+  return { x, y, tangent: Math.atan2(dy, dx) };
+}
+
+/**
+ * Cluster fix: for every twig with more than one member, samples the
+ * representative's finished spine at the widened t-spread
+ * ([0.45, 0.72, 1.0] for 3, [0.7, 1.0] for 2), nudges non-tip members a
+ * small perpendicular distance off the local tangent (alternating sides),
+ * and records the minimum along-twig spacing actually achieved for
+ * verification. The tip member (t=1.0, the representative itself) gets no
+ * nudge — it sits exactly at the branch tip.
+ */
+function applyTwigMemberSampling(twigs, grassClampY) {
+  twigs.forEach(twig => {
+    const { members, representative: rep } = twig;
+    if (members.length <= 1) {
+      twig.minMemberSpacing = null;
+      return;
+    }
+    if (!rep.p0 || !rep.p1 || !rep.p2 || !rep.p3) return;
+
+    const tValues = TWIG_T_BY_COUNT[members.length] || TWIG_T_BY_COUNT[3];
+    const sampled = tValues.map(t => sampleCubicBezier(rep.p0, rep.p1, rep.p2, rep.p3, t));
+
+    members.forEach((member, i) => {
+      const s = sampled[i];
+      const isTip = i === members.length - 1;
+      const sign = (i % 2 === 0) ? 1 : -1;
+      const nudgeFrac = 0.35 + seedHash(member.data.id + '_twigSide') * 0.25; // 0.35-0.6 of leaf height
+      const nudgePx = isTip ? 0 : nudgeFrac * TWIG_LEAF_HEIGHT_PX;
+      const nx = Math.cos(s.tangent + Math.PI / 2);
+      const ny = Math.sin(s.tangent + Math.PI / 2);
+      member.x3 = s.x + nx * nudgePx * sign;
+      // Same grass-line ceiling the representative's own placement enforces
+      // (treeLayout.js's leaf-placement block) — an S-curve's droop/bulge can
+      // otherwise carry an intermediate sample below the clamped tip.
+      member.y3 = Math.min(s.y + ny * nudgePx * sign, grassClampY);
+      member.exitTangent = s.tangent;
+      // LineageTracer reads .x/.y (not .x3/.y3) for its ancestor path — every
+      // other node type gets these set inside computeSCurveSpineGeometry /
+      // computeTrunkSpineGeometry, which non-representative members skip.
+      member.x = member.x3;
+      member.y = member.y3;
+    });
+
+    let minGap = Infinity;
+    for (let i = 1; i < members.length; i++) {
+      minGap = Math.min(minGap, Math.hypot(
+        members[i].x3 - members[i - 1].x3,
+        members[i].y3 - members[i - 1].y3
+      ));
+    }
+
+    if (minGap < TWIG_MIN_SPACING_PX) {
+      // The grass clamp above can flatten every member to the same Y (a twig
+      // lying almost along the grass line), collapsing spacing down to
+      // whatever X-spread happened to survive. Y is already correctly
+      // clamped and must not move; restore the floor by stretching members
+      // along X around their shared centroid instead (safe here since the
+      // clamped case is effectively colinear along X).
+      const cx = members.reduce((sum, m) => sum + m.x3, 0) / members.length;
+      const stretch = (TWIG_MIN_SPACING_PX * 1.1) / Math.max(minGap, 1);
+      members.forEach(m => { m.x3 = cx + (m.x3 - cx) * stretch; m.x = m.x3; });
+      minGap = Infinity;
+      for (let i = 1; i < members.length; i++) {
+        minGap = Math.min(minGap, Math.hypot(
+          members[i].x3 - members[i - 1].x3,
+          members[i].y3 - members[i - 1].y3
+        ));
+      }
+    }
+
+    twig.minMemberSpacing = minGap;
+  });
 }
 
 /**
