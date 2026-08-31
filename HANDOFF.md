@@ -85,8 +85,8 @@ an in-app Browser pane with a `preview_start` tool pointed at the
 |---|------|--------|
 | 1 | Single-origin limbs → per-limb trunk attachment | **Landed + visually confirmed** |
 | 2 | Sector widened to 230° | **Landed + visually confirmed** |
-| 3 | Size-aware radial bands + variable depth step | **Untouched** — design decided (see §5), not coded |
-| — | Leaf clusters (3 leaves/twig, shared parent twig) | **Untouched** — design decided (see §5), lands together with fix 3 |
+| 3 | Size-aware radial bands + variable depth step | **Untouched** — the twig-indexing rework landed (below) but `idx%3` banding and the uniform `depthRadiusStep` are unchanged; still pending |
+| — | Leaf clusters (twigs of up to 3, shared parent branch) | **Landed + visually confirmed** |
 | 4 | Wedge containment for branch curves | **Untouched** |
 | 5 | Branch-spine relaxation pass | **Untouched** — did not exist at all before this session either (see §6) |
 | 6 | S-curved branches | Pre-existing partial implementation, **not yet re-based** on the fix-1/2/3 layout |
@@ -123,40 +123,92 @@ originally flagged this as needing review; it turned out fine as-is, since
 the clamp is expressed in absolute world Y tied to `trunkBaseY`, not
 relative to any particular limb origin).
 
+Leaf clusters ("landed + visually confirmed"): sibling terminal leaves are
+now grouped into twigs of up to 3 that share one physical branch
+(`collectOrderedTwigs`, [src/treeLayout.js:76-156](src/treeLayout.js#L76-L156)) —
+64 twigs from 117 leaves. Only the twig's representative (last member in
+traversal order) gets a real arc-allocated angle/radius and Bezier spine;
+other members are anchored by sampling that finished spine at
+`t=[0.45,0.72,1.0]` (3 members) or `[0.7,1.0]` (2), with a small seeded
+perpendicular nudge alternating sides (`applyTwigMemberSampling`,
+[src/treeLayout.js:453-508](src/treeLayout.js#L453-L508)). Verified via
+screenshot at `window.__setView(2729, 2485, 1.3)` (a 3-member twig): three
+leaves visibly growing off one shared branch, clearly separated, not
+overlapping — matches the reference poster's cluster look. A second
+screenshot at `window.__setView(870, 2400, 1.4)` confirmed the edge-case fix
+below also reads correctly (three leaves near the grass line, distinguishable,
+not flattened into an unreadable clump).
+
+Two real bugs surfaced and were fixed during this pass, both worth knowing
+about if you touch this code:
+1. **Degenerate natural length.** The twig's terminal-segment length is
+   scaled from the "natural" parent→leaf distance the existing (pre-cluster)
+   placement formula produces — but that natural distance can be
+   pathologically short (13.6px observed) when a leaf's own arc-allocated
+   radius happens to nearly coincide with its parent's depth-based radius
+   (two independent formulas; this is exactly the kind of gap "fix 3 proper"
+   — size-aware bands — is meant to close, still pending). Naively scaling a
+   near-zero vector by the required-length ratio produced an 11.95x
+   multiplier and catapulted that twig to the grass clamp. Fixed with a 60px
+   floor on the base length plus a `targetAngle`-derived fallback direction
+   (the near-zero natural vector's *direction* is as unreliable as its
+   magnitude) — see the `MIN_BASE_LEN` block in
+   [src/treeLayout.js:289-336](src/treeLayout.js#L289-L336).
+2. **Grass clamp gap.** The clamp only ever applied to the representative's
+   own tip; non-representative members, sampled from a drooping S-curve,
+   could dip below it (13 leaves observed at `y3 > 2400`). Added the same
+   clamp inside `applyTwigMemberSampling`. That fix then flattened one
+   twig's three members to identical Y (a twig lying almost flat along the
+   grass line), collapsing along-twig spacing to whatever X-spread survived
+   (39.2px — just under the 40px floor). Added a small post-hoc correction:
+   when this flattening is detected, stretch members along X around their
+   shared centroid (Y is already correctly clamped and must not move) — see
+   the `minGap < TWIG_MIN_SPACING_PX` block right after the spacing
+   calculation in `applyTwigMemberSampling`.
+
 ### Current headless metrics (run `node scripts/report_metrics.mjs` to
 reproduce — this is the ground truth, re-run it after every change)
 
 ```json
 {
   "totalLeaves": 117,
-  "leafPairCollisions": 24,
-  "branchPairCollisions": 102,
-  "R_min": 446,
+  "twigCount": 64,
+  "minTwigMemberSpacingPx": 44,
+  "leafPairCollisions": 18,
+  "branchPairCollisions": 50,
+  "R_min": 373,
   "radiusUsed": 1150,
-  "canopyFillPct": 8,
+  "canopyFillPct": 4.9,
   "leftFlankFillPct": 0,
   "rightFlankFillPct": 0
 }
 ```
 
-These are post-fix-2 numbers (previously, post-fix-1-only: `R_min` 662,
-`leafPairCollisions` 4, `branchPairCollisions` 90, `canopyFillPct` 11.8 — see
-git history on `src/treeLayout.js` if you want the exact prior state).
-`R_min` dropped as expected — a wider sector needs less radius for the same
-minimum arc-length spacing between leaves. `leafPairCollisions` and
-`branchPairCollisions` both *rose* — this is expected collateral, not a
-regression: arc allocation still assigns angle purely from each leaf's
-global right-to-left index, the same physical angle regardless of which
-limb's origin it's actually placed around (fix 1 gave each limb its own
-*origin point*, but did not change how *angle* is assigned), so a wider
-angular spread increases the chance that two leaves belonging to different
-limbs — placed around origins that differ in Y along the trunk but share the
-same X — land close together in absolute world space. Fix 4/5 (wedge
-containment + relaxation) is what actually resolves this; don't chase these
-numbers down before then. `leftFlankFillPct`/`rightFlankFillPct` are still
-0% — expected, since nothing yet targets leaf *density* at the flanks
-specifically (arc allocation still uses the old fixed-radius-band model);
-that's fix 3's job, not fix 2's.
+These are post-cluster numbers. For context, the run-up: post-fix-1-only —
+`R_min` 662, `leafPairCollisions` 4, `branchPairCollisions` 90,
+`canopyFillPct` 11.8; post-fix-2 — `R_min` 446, `leafPairCollisions` 24,
+`branchPairCollisions` 102, `canopyFillPct` 8 (see git history on
+`src/treeLayout.js` for exact prior states). `twigCount`/
+`minTwigMemberSpacingPx` are new fields this pass — `totalLeaves` (117) is
+unaffected by clustering (still one SVG leaf element per person), `twigCount`
+(64) is what now drives `R_min` and arc allocation.
+
+`R_min` dropped further (446→373) — expected, since `N` dropped from 117
+leaves to 64 twigs even though the clearance constant grew (34→52) to
+account for a twig cluster being wider than a single leaf; the net effect is
+still a smaller minimum radius requirement. `leafPairCollisions` and
+`branchPairCollisions` both dropped too (24→18, 102→50) — twig-indexed arc
+allocation naturally spreads things out more per slot than leaf-indexed did,
+plus twig-clustered leaf pairs are now correctly exempted from
+`leafPairCollisions` via `clusterId` (they sit close by design). Don't read
+either as "the cluster fix reduced collisions" causally, though — the
+underlying angle-assignment mechanism (still `idx%3` banding, no wedge
+containment) is unchanged; these numbers are the same category of
+not-yet-meaningful churn described under fix 2 above, and fix 4/5 is still
+what actually resolves them. `leftFlankFillPct`/`rightFlankFillPct` are
+still 0% — still expected, since "fix 3 proper" (size-aware bands, variable
+depth step) is what's supposed to target flank density specifically, and it
+hasn't landed yet — see the fix-by-fix table above.
 
 ---
 
@@ -203,30 +255,35 @@ order:
    computed — don't try to merge these two `eachBefore` walks.
 
 `buildBotanicalLayout` returns `{ root, personMap, rootId, maxDepth,
-orderedLeaves, N, R_min, baseCanopyRadius, attachments, radialBands,
-depthRadiusStep, sector, layoutOpts }`. The extra fields beyond what existed
-before this session (`attachments`, `radialBands`, `depthRadiusStep`,
-`sector`, `layoutOpts`) exist so `src/layoutMetrics.js` and the debug overlay
-can inspect the layout's own model of itself without recomputing anything.
+orderedLeaves, orderedTwigs, N, R_min, baseCanopyRadius, attachments,
+radialBands, depthRadiusStep, sector, layoutOpts }`. `orderedTwigs` (added
+alongside leaf clustering) is the array of twig-group objects
+(`{ id, parent, members, representative, minMemberSpacing }`) — `N` is now
+`orderedTwigs.length`, not `orderedLeaves.length`. `src/layoutMetrics.js`
+and the debug overlay use these to inspect the layout's own model of itself
+without recomputing anything.
 
 **`src/branchGenerator.js`** — pure function
 `createTaperedBranchPolygonPath(node, samples=12)`. Samples the node's cubic
 Bézier spine (`p0..p3`) at `samples` points, offsets left/right by half the
 interpolated width at each point, and closes it into one SVG polygon path.
-Untouched this session, don't need to touch it for fixes 1–5 (wedge clamping
+**Unchanged, including through leaf clustering** — it already returns `''`
+when `p0..p3` are missing, which is exactly the state a non-representative
+twig member's node is left in (§4, "Leaf clusters"), so clustered members
+draw no branch of their own for free. Don't touch it for fixes 1–5 (wedge clamping
 in fix 4 constrains the *spine* control points that go in; this file just
 draws whatever spine it's given).
 
 **`src/leafRenderer.js`** — `createLeafNode(node, x, y, angleDeg, showText)`
 builds one leaf's SVG `<g>`: a rotated body group (leaf shape + vein) with a
 nested text group inside it (this nesting is why Arabic text sits correctly
-inside the leaf — don't flatten it back out). One leaf per terminal node
-today, each gets its own `<g>` at its own tip. This file is where the cluster
-work (§5) will need a new code path: either this function grows a
-"sibling offset" parameter, or a new `createLeafCluster` function replaces it
-for terminal siblings that share a twig — your call when you get there, but
-whichever you pick, the text-nesting-inside-rotated-group pattern must
-survive.
+inside the leaf — don't flatten it back out). **Unchanged, and it turned out
+it didn't need to change for leaf clustering** — every leaf, whether a twig
+representative or a clustered sibling sampled off a shared spine (§4/§5),
+still gets its own call to this exact function with its own `(x, y, angle)`;
+the earlier plan in this file speculated a new code path would be needed
+here, that speculation was wrong once the representative/spine-sampling
+design (§4, "Leaf clusters") was worked out.
 
 **`src/main.js`** — orchestration, not layout math. `renderTree(treeData)`
 (lines 40–218) calls `buildBotanicalLayout`, then walks `descendants` twice —
@@ -309,7 +366,7 @@ specifically so the embedded font doesn't get split out as a separate file.
 
 ## 4. The full fix list with landing spots
 
-All line numbers below are current as of commit `14a730d` on this branch.
+All line numbers below are current as of commit `801a2cf` on this branch.
 Re-check them if you've made edits since reading this — they will drift.
 
 ### Fix 1 — Single origin (LANDED)
@@ -380,57 +437,63 @@ green dashed grass line even with the sector now reaching past horizontal.
 **Status:** Landed, visually confirmed (see §2 for the screenshot
 description and updated metrics — `R_min` 662→446).
 
-### Fix 3 — Radial position ignores lineage size (UNTOUCHED, design decided)
+### Fix 3 — Radial position ignores lineage size (PARTIALLY LANDED)
 
-**Is:** Leaf radial band is `idx % 3` against `radialBands = [0.74, 0.94,
-1.14]` ([src/treeLayout.js:122](src/treeLayout.js#L122), applied at
-[src/treeLayout.js:134-135](src/treeLayout.js#L134-L135)) — purely
+**Was:** Leaf radial band was `idx % 3` against `radialBands = [0.74, 0.94,
+1.14]` ([src/treeLayout.js:122](src/treeLayout.js#L122)) — purely
 positional, unrelated to how big the leaf's lineage is. Internal-node radial
-step is `depthRadiusStep = (baseCanopyRadius * 0.65) / (maxDepth + 1)`
+step was `depthRadiusStep = (baseCanopyRadius * 0.65) / (maxDepth + 1)`
 ([src/treeLayout.js:148](src/treeLayout.js#L148)), a single fixed value
 applied uniformly regardless of how many generations remain below any given
-node ([src/treeLayout.js:221](src/treeLayout.js#L221) — `const r = originLead
-+ node.depth * depthRadiusStep * (...)`). A short lineage (one generation
-deep) gets dragged out to the same per-depth step as a four-generation one,
-leaving unnatural gaps.
+node. A short lineage (one generation deep) got dragged out to the same
+per-depth step as a four-generation one, leaving unnatural gaps.
 
-**Fix to make, and how it now interacts with clusters (see §5 for the
-reasoning):** This fix cannot be implemented in isolation from the leaf
-cluster decision, because clustering changes what "N" (the leaf count that
-drives `R_min` and arc allocation) means. Build them together:
+**What landed (the twig-indexing half):** The leaf-vs-cluster arc-allocation
+rework is done — see "Leaf clusters" below, which was implemented together
+with this fix per the plan (clustering changes what `N` means, so tuning
+band assignment before clustering existed would have meant redoing it).
+`collectOrderedTwigs` ([src/treeLayout.js:76-156](src/treeLayout.js#L76-L156))
+replaces `collectOrderedLeaves`; `N` is now twig count (64), not leaf count
+(117); `R_min`'s clearance constant is 52, not 34 (a twig cluster is wider
+than a single leaf). The arc-allocation loop
+([src/treeLayout.js:194-223](src/treeLayout.js#L194-L223)) iterates twigs,
+assigning angle/radius to each twig's representative.
 
-1. Decide the twig grouping first: for each internal node whose children are
-   all terminal leaves, group those leaf-children into twigs of up to 3
-   (see §5 for the exact clustering rule and the alternating-sides detail).
-   Each twig, not each leaf, gets one arc-allocation slot.
-2. Rework `collectOrderedLeaves` (or add a sibling function) so `N` becomes
-   the twig count, not `orderedLeaves.length`. `R_min`
-   ([src/treeLayout.js:118](src/treeLayout.js#L118)) and the leaf angle loop
-   ([src/treeLayout.js:124-144](src/treeLayout.js#L124-L144)) both need to
-   index by twig, and the two-or-three leaves inside a twig then get their
-   own small angular offsets around their twig's `targetAngle` (this is
-   where "alternating sides" happens — leaf 1 slightly clockwise of the twig
-   angle, leaf 2 slightly counter-clockwise, leaf 3 near-centered, or
-   similar).
-3. Replace the `idx % 3` band lookup with one derived from the twig's (or
-   its parent leaf-node's) depth-1 ancestor's `subtreeSize` — map larger
-   `subtreeSize` to outer bands, smaller to inner. Keep some `% 3`-style
-   texture *within* a lineage's assigned band range so it doesn't look
-   robotically banded, but the primary driver should be lineage size, not
-   raw index parity.
-4. Replace the fixed `depthRadiusStep` at internal nodes with
-   `step = availableRadialSpan / subtreeHeight`, where `subtreeHeight` is
-   how many more generations exist below that specific node (d3 gives you
-   `node.height` for this after `stratify()` — verify it's still correct
-   after any `singleLimbMode` filtering, since that mode trims the person
-   list before stratifying). A four-generation lineage should spread its
-   depth steps across the full available radial span; a lineage that
-   terminates one generation down should stop close to its limb origin
-   rather than being stretched to match deeper siblings.
+**What's still NOT done (the size-aware half — this is the actual "fix 3"
+from the original brief):**
 
-**Status:** Not started. Cluster model and arc-allocation approach are
-decided (§5) — what's left is writing the twig-grouping code, reworking `N`
-and `collectOrderedLeaves`, and wiring the two new formulas in above.
+1. The band lookup is *still* `idx % 3` against the same fixed
+   `radialBands`, just now applied per-twig-index instead of per-leaf-index
+   ([src/treeLayout.js:206-207](src/treeLayout.js#L206-L207)). It still has
+   nothing to do with lineage size. Replace it with one derived from the
+   twig's depth-1 ancestor's `subtreeSize` — map larger `subtreeSize` to
+   outer bands, smaller to inner. Keep some `% 3`-style texture *within* a
+   lineage's assigned band range so it doesn't look robotically banded, but
+   the primary driver should be lineage size, not raw index parity.
+2. `depthRadiusStep` is still the same single fixed value applied uniformly
+   at every internal node ([src/treeLayout.js:227](src/treeLayout.js#L227),
+   consumed at [src/treeLayout.js:334](src/treeLayout.js#L334)). Replace it
+   with `step = availableRadialSpan / subtreeHeight` per node (`node.height`
+   after `stratify()`; verify it's still correct under `singleLimbMode`,
+   which trims the person list before stratifying). A four-generation
+   lineage should spread its depth steps across the full available radial
+   span; a lineage that terminates one generation down should stop close to
+   its limb origin rather than being stretched to match deeper siblings.
+3. The `baseCanopyRadius` floor (`Math.max(R_min/0.74+180, 1150)`,
+   [src/treeLayout.js:184](src/treeLayout.js#L184)) is still a single flat
+   1150 regardless of `R_min` — this was deliberately left as-is (agreed
+   during this session's design discussion) to be revisited once step 2
+   above replaces the single global `baseCanopyRadius` concept with
+   per-lineage radial reach; a single flat floor may not make sense once
+   reach is computed per-lineage.
+
+Doing 1 and 2 is what should finally move `leftFlankFillPct` /
+`rightFlankFillPct` off 0% (still 0/0 as of this commit — see §2) — nothing
+implemented so far targets leaf *density* at the flanks specifically, only
+the *reach* (fix 2) and the *sharing of branches* (clustering).
+
+**Status:** Partially landed — twig-indexing done, size-aware banding and
+variable depth step still pending.
 
 ### Fix 4 — Branches escape their own wedge and cross (UNTOUCHED)
 
@@ -577,21 +640,53 @@ there's one twig serving 2–3 leaves, not one branch per leaf.
 needs re-pointing at twig spines instead of per-leaf spines once clusters
 exist.
 
-### Leaf clusters (UNTOUCHED, design decided — see §5)
+### Leaf clusters (LANDED, with two corrections beyond the original design — see §5)
 
-**Is:** One leaf per terminal node, one twig per leaf, rendered by
-`createLeafNode` in [src/leafRenderer.js](src/leafRenderer.js) and placed at
-each leaf node's own `x3/y3` tip
-([src/main.js:154-159](src/main.js#L154-L159)). No sharing, no clustering, no
-`t = [0.55, 0.78, 1.0]` sampling anywhere in the codebase.
+**Was:** One leaf per terminal node, one branch per leaf, each placed at its
+own independently arc-allocated `x3/y3` tip. No sharing, no clustering.
 
-**Fix to make:** See §5 for the full reasoning. Short version: group
-terminal siblings into twigs of up to 3, alternating sides along a shared
-parent twig, with leaves attached at `t = 0.55 / 0.78 / 1.0` along that
-twig's spine. Build this together with fix 3, not after it (§5 explains
-why — it changes fix 3's math, not just its visuals).
+**Fix, as implemented:** Terminal siblings are grouped into twigs of up to 3
+(`collectOrderedTwigs`,
+[src/treeLayout.js:76-156](src/treeLayout.js#L76-L156); balanced chunking —
+`n=4` splits `[2,2]`, not `[3,1]`). Only the twig's representative (last
+member in traversal order) gets arc-allocated and goes through the normal
+position + Bézier-geometry passes unchanged — it owns the twig's one real
+branch. Other members get no branch and no arc-allocation slot; they're
+anchored afterward by sampling the representative's *finished* spine (see
+`applyTwigMemberSampling`,
+[src/treeLayout.js:453-508](src/treeLayout.js#L453-L508)) at
+`t = [0.45, 0.72, 1.0]` for 3 members or `[0.7, 1.0]` for 2 — widened from
+the original `[0.55, 0.78, 1.0]` design (see §5's original reasoning for why
+that spacing was chosen, and the correction below for why it changed) — with
+a small perpendicular nudge (0.35–0.6 × 22px leaf height, seeded per leaf,
+alternating sign) off the local tangent. The tip member (t=1.0, the
+representative) gets no nudge. This required **no changes to
+`src/leafRenderer.js` or `src/branchGenerator.js`** — `createLeafNode`
+already takes an arbitrary `(x, y, angle)` per leaf, and
+`createTaperedBranchPolygonPath` already returns `''` when `p0..p3` are
+missing, so non-representative members simply draw no branch of their own
+for free. `node.clusterId` is set on every member so
+`layoutMetrics.js`'s pre-existing collision exemption (§3) activates.
 
-**Status:** Not started.
+**Two corrections made beyond the originally-approved design** (both are
+documented in code comments at their fix sites, and in §2's "Two real bugs"
+paragraph above):
+1. Terminal branch length now scales explicitly with member count (1x /
+   1.35x / 1.7x for 1/2/3 members) with a 40px along-twig spacing floor
+   enforced analytically — this replaced an earlier version of the design
+   that assumed the existing per-leaf radius formulas would produce a
+   reasonably-sized "natural" length to scale from, which turned out false
+   for some nodes (13.6px observed) and needed a 60px floor + stable-
+   direction fallback.
+2. The grass-line clamp needed to be applied to sampled non-representative
+   members too, not just the representative's own tip — plus a rare
+   secondary correction (X-axis stretch) for the case where that clamp
+   flattens a whole twig against the grass line and compresses spacing back
+   below the 40px floor.
+
+**Status:** Landed, visually confirmed (§2). `twigCount` 64 from
+`totalLeaves` 117, `minTwigMemberSpacingPx` 44 (floor 40) — both reproducible
+via `node scripts/report_metrics.mjs`.
 
 ---
 
@@ -605,6 +700,18 @@ brief's step 9 assumes when it says "leaf clusters already exist at
 `t = [0.55, 0.78, 1.0]`" (they don't, in this codebase — see §6 — but the
 *t*-value convention the brief describes is worth keeping, since it defines
 where along a twig's Bézier each leaf's anchor sits).
+
+*Implemented with widened t-values*: `[0.45, 0.72, 1.0]` for 3 members,
+`[0.7, 1.0]` for 2 — not the `[0.55, 0.78, 1.0]` originally planned here.
+The original spread put adjacent members only ~0.23 of the twig's length
+apart, which (combined with a 46px-long leaf shape) meant members could
+overlap along the twig axis regardless of how much the twig's own length
+was scaled. Widening the *t*-spread (~0.27–0.3 gaps) plus scaling twig
+length with member count together satisfy a 40px minimum along-twig spacing
+— see the "Leaf clusters" entry in §4 for the two runtime corrections that
+were also needed (a degenerate-short-natural-length case, and a grass-clamp
+interaction) to make that guarantee actually hold for every twig, not just
+the typical case.
 
 **Arc allocation must index twigs, not leaves, with `R_min` recomputed from
 twig count — and this must be built together with fix 3, not after it, and
@@ -908,47 +1015,43 @@ something looks wrong.
 
 ## 9. Immediate next action
 
-Fixes 1 and 2 are both landed and visually confirmed (§2). **Implement fix 3
-together with leaf clustering**, per the design already decided in §5 — do
-not implement fix 3's band-mapping logic against the current
-117-independent-leaves model and expect to reuse that tuning after adding
-clusters; §5 explains why that doesn't work (clustering changes what `N` —
-the count driving `R_min` and arc allocation — actually means, from 117
-leaves to roughly 40 twigs).
+Fixes 1, 2, and leaf clustering are landed and visually confirmed (§2).
+Fix 3's twig-indexing half landed alongside clustering; its size-aware half
+did not. **Implement the remaining half of fix 3**: size-aware radial
+banding and the variable per-lineage depth step — full detail in §4's
+"Fix 3" section, points 1 and 2 there. Concretely:
 
-This is the largest remaining piece of work before fix 4/5. Concretely, in
-order (full detail in §4's "Fix 3" section):
-
-1. Write the twig-grouping logic: for internal nodes whose children are all
-   terminal leaves, group those leaf-children into twigs of up to 3, with
-   per-leaf angular offsets around the twig's angle (alternating sides) and
-   attachment at `t = 0.55 / 0.78 / 1.0` along the twig's own spine.
-2. Rework `collectOrderedLeaves` (or add a sibling function) so `N` counts
-   twigs, not leaves, and `R_min` / the angle-allocation loop
-   ([src/treeLayout.js:118](src/treeLayout.js#L118),
-   [src/treeLayout.js:124-144](src/treeLayout.js#L124-L144)) index by twig.
-3. Replace the `idx % 3` radial-band lookup
-   ([src/treeLayout.js:134](src/treeLayout.js#L134)) with one derived from
-   the depth-1 ancestor's `subtreeSize` (large lineages → outer bands, small
-   → inner), keeping light `% 3`-style texture within a lineage.
-4. Replace the fixed `depthRadiusStep`
-   ([src/treeLayout.js:148](src/treeLayout.js#L148), applied at
-   [src/treeLayout.js:221](src/treeLayout.js#L221)) with
-   `step = availableRadialSpan / subtreeHeight` per node, so short lineages
-   stop near their limb origin instead of being stretched to match deeper
-   siblings.
-5. In `src/leafRenderer.js`, add whatever's needed to render a twig's 2–3
-   leaves at their individual anchor points while keeping the text-nested-
-   inside-rotated-group pattern intact (§7 — must not regress).
-6. Set `node.clusterId` on sibling leaves sharing a twig — this makes
-   `layoutMetrics.js`'s existing collision-exemption logic (§3) start
-   working for free, and is also what will let you report `twigPairCollisions`
-   separately from `leafPairCollisions` per §8's protocol once you get to a
-   checkpoint screenshot.
+1. Replace the `idx % 3` radial-band lookup
+   ([src/treeLayout.js:206-207](src/treeLayout.js#L206-L207)) with one
+   derived from the twig's depth-1 ancestor's `subtreeSize` (large lineages
+   → outer bands, small → inner), keeping light `% 3`-style texture within a
+   lineage so it doesn't look robotically banded.
+2. Replace the fixed `depthRadiusStep`
+   ([src/treeLayout.js:227](src/treeLayout.js#L227), applied at
+   [src/treeLayout.js:334](src/treeLayout.js#L334)) with
+   `step = availableRadialSpan / subtreeHeight` per node (`node.height` after
+   `stratify()`), so short lineages stop near their limb origin instead of
+   being stretched to match deeper siblings.
+3. Once per-lineage radial reach is real, revisit the `baseCanopyRadius`
+   floor (`Math.max(R_min/0.74+180, 1150)`,
+   [src/treeLayout.js:184](src/treeLayout.js#L184)) — deliberately left flat
+   at 1150 until now (§4, §5) since a single global floor may not make sense
+   once reach is computed per-lineage rather than globally.
 
 After the change: rebuild, run `node scripts/report_metrics.mjs`, and expect
-`leftFlankFillPct`/`rightFlankFillPct` to move meaningfully off 0 for the
-first time (currently 0/0 — §2) since this is the fix that actually targets
-leaf density at the flanks, not just the angular range fix 2 opened up.
-`leafPairCollisions`/`branchPairCollisions` may still be nonzero — that's
-still expected until fix 4/5.
+`leftFlankFillPct`/`rightFlankFillPct` to *finally* move meaningfully off 0%
+(still 0/0 as of this commit — §2) — this is the first fix that actually
+targets leaf *density* at the flanks, as opposed to just the angular *reach*
+(fix 2) or how leaves share branches (clustering). Watch `twigCount` (should
+stay 64 — this fix doesn't change grouping, only where things end up
+radially) and `minTwigMemberSpacingPx` (should stay ≥40 — if a lineage's
+radial reach changes enough to shrink a twig's natural length back toward
+the degenerate case described in §4/§2, the existing floor-enforcement and
+grass-clamp-interaction fixes should still hold, but re-verify rather than
+assume).
+
+Once that's done, fix 4 (wedge containment) and fix 5 (relaxation pass) are
+next — both still fully unimplemented (§4), and both should meaningfully
+move `leafPairCollisions`/`branchPairCollisions` down for the first time
+(currently 18/50 — §2 — churn from re-indexing through a still-imperfect
+allocation formula, not yet anything approaching a real fix).
