@@ -74,7 +74,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
     trunkCenterX = width / 2,
     rootTrunkLength = 340,
     rootBaseWidth = 54,
-    sectorSpanDeg = 155,
+    sectorSpanDeg = 230,
     singleLimbMode = false
   } = options;
 
@@ -110,9 +110,12 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const N = orderedLeaves.length || 1;
 
   // 3. Part A - Step 3 & 4: Arc Allocation & R_min Calculation
-  const sectorWidthRad = (sectorSpanDeg * Math.PI) / 180; // ~2.705 rad for 155 deg
-  const rightmostAngle = -Math.PI / 2 + sectorWidthRad / 2; // Right side start (~-8.5 deg)
-  const leftmostAngle = -Math.PI / 2 - sectorWidthRad / 2;  // Left side end (~-171.5 deg)
+  // Fix 2: widened to 230° (was 155°) so outer edges reach ~25° past horizontal on
+  // both flanks, letting small lineages lean down beside the trunk instead of stopping
+  // dead at horizontal.
+  const sectorWidthRad = (sectorSpanDeg * Math.PI) / 180; // ~4.014 rad for 230 deg
+  const rightmostAngle = -Math.PI / 2 + sectorWidthRad / 2; // Right side start (~25 deg, past horizontal)
+  const leftmostAngle = -Math.PI / 2 - sectorWidthRad / 2;  // Left side end (~-205 deg, past horizontal)
 
   // R_min = 34 * N / (3 * sectorWidth * 0.74)
   const R_min = (34 * N) / (3 * sectorWidthRad * 0.74);
@@ -122,7 +125,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const radialBands = [0.74, 0.94, 1.14];
 
   orderedLeaves.forEach((leafNode, idx) => {
-    // Exact angular position across 155° sector (Right to Left)
+    // Exact angular position across the sector (Right to Left)
     const t = (idx + 0.5) / N;
     const baseAngle = rightmostAngle - t * sectorWidthRad;
 
