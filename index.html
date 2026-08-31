@@ -28,6 +28,7 @@
       <button id="btn-benchmark" class="control-btn">اختبار 2000 أصل (Stress Test)</button>
       <button id="btn-reset-cam" class="control-btn">إعادة الضبط</button>
       <button id="btn-profiler" class="control-btn">تقرير الأداء (Profiler)</button>
+      <button id="btn-debug" class="control-btn">طبقة الفحص (Debug)</button>
     </div>
 
     <!-- Performance Profiler Card -->
@@ -101,6 +102,8 @@
         <g id="branches-layer"></g>
         <!-- Nodes Layer -->
         <g id="nodes-layer"></g>
+        <!-- Debug Overlay Layer (wedges, canopy bands, trunk attachment points) -->
+        <g id="debug-layer" style="display: none; pointer-events: none;"></g>
       </g>
     </svg>
   </div>

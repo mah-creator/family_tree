@@ -140,18 +140,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
     leafNode.targetAngle = baseAngle;
     leafNode.targetRadius = leafRadius;
-
-    // World coordinates for leaf tip
-    leafNode.x3 = trunkCenterX + Math.cos(baseAngle) * leafRadius * 1.05;
-    leafNode.y3 = trunkBaseY + Math.sin(baseAngle) * leafRadius * 0.85;
-
-    // Upward clamping
-    if (leafNode.y3 > trunkBaseY - 100) {
-      leafNode.y3 = trunkBaseY - 100;
-    }
+    // World coordinates computed later from the owning limb's origin (Fix 1)
   });
 
-  // 5. Part A - Step 5: Internal nodes follow children (Polar Reingold-Tilford)
+  // 5. Part A - Step 5: Internal node ANGLES follow children (bottom-up mean)
   const maxDepth = d3.max(root.descendants(), d => d.depth) || 1;
   const depthRadiusStep = (baseCanopyRadius * 0.65) / (maxDepth + 1);
 
@@ -159,11 +151,27 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const depth1Subtrees = (root.children || []).slice().sort((a, b) => (b.subtreeSize || 1) - (a.subtreeSize || 1));
   const sweepingLimbs = new Set(depth1Subtrees.slice(0, 3).map(d => d.data.id));
 
-  // Compute angles & radii for internal nodes bottom-up
   root.eachAfter(node => {
     node.personMap = personMap;
     if (node === root) {
       node.targetAngle = -Math.PI / 2;
+      return;
+    }
+    if (!node.children || node.children.length === 0) return; // leaf angles already set
+
+    let sumAngle = 0;
+    node.children.forEach(c => {
+      sumAngle += c.targetAngle !== undefined ? c.targetAngle : -Math.PI / 2;
+    });
+    node.targetAngle = sumAngle / node.children.length;
+  });
+
+  // Fix 1: depth-1 limbs attach along the trunk (35%–100% of its length), not at a single apex
+  const attachments = assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrunkLength });
+
+  // Positions top-down so every node inherits its owning limb's origin
+  root.eachBefore(node => {
+    if (node === root) {
       node.x0 = trunkCenterX;
       node.y0 = trunkBaseY;
       node.x3 = trunkCenterX;
@@ -171,39 +179,48 @@ export function buildBotanicalLayout(treeData, options = {}) {
       node.baseWidth = rootBaseWidth;
       node.tipWidth = Math.max(16, rootBaseWidth * 0.55);
       node.exitTangent = -Math.PI / 2;
+      node.limbOrigin = null;
       return;
     }
 
-    if (!node.children || node.children.length === 0) {
-      // Leaf node angles already set
-      return;
-    }
-
-    // Mean of children's target angles
-    let sumAngle = 0;
-    node.children.forEach(c => {
-      sumAngle += c.targetAngle !== undefined ? c.targetAngle : -Math.PI / 2;
-    });
-    node.targetAngle = sumAngle / node.children.length;
-
-    // Internal node position
     const isTrunk = !!node.data.isTrunkLineage;
-    const isSweeping = sweepingLimbs.has(node.data.id);
+
+    // Depth-1 limbs got their own origin in assignLimbAttachments; descendants inherit it
+    if (!node.limbOrigin) node.limbOrigin = node.parent.limbOrigin || null;
 
     if (isTrunk) {
+      node.limbOrigin = null;
       node.x3 = trunkCenterX;
       node.y3 = trunkBaseY - rootTrunkLength - node.depth * depthRadiusStep * 0.9;
-    } else if (isSweeping && node.depth === 1) {
+      return;
+    }
+
+    const origin = node.limbOrigin;
+    const cx = origin ? origin.x : trunkCenterX;
+    const cy = origin ? origin.y : trunkBaseY;
+    // Trunk length not consumed by the attachment height — keeps overall reach comparable
+    const originLead = origin ? rootTrunkLength * (1 - origin.frac) : rootTrunkLength;
+
+    if (!node.children || node.children.length === 0) {
+      // Terminal leaf: polar placement around the owning limb origin
+      node.x3 = cx + Math.cos(node.targetAngle) * node.targetRadius * 1.05;
+      node.y3 = cy + Math.sin(node.targetAngle) * node.targetRadius * 0.85;
+      if (node.y3 > trunkBaseY - 100) node.y3 = trunkBaseY - 100;
+      return;
+    }
+
+    if (sweepingLimbs.has(node.data.id) && node.depth === 1) {
       // Part B - Step 9: Long sweeping limb crossing trunk axis
       const sweepSide = (seedHash(node.data.id + '_side') > 0.5) ? 1 : -1;
       const sweepDist = 480 + (seedHash(node.data.id + '_sweep') - 0.5) * 100;
-      node.x3 = trunkCenterX + Math.cos(node.targetAngle + sweepSide * 0.25) * sweepDist;
-      node.y3 = trunkBaseY - rootTrunkLength - 120 + Math.sin(node.targetAngle) * sweepDist * 0.7;
-    } else {
-      const r = rootTrunkLength + node.depth * depthRadiusStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
-      node.x3 = trunkCenterX + Math.cos(node.targetAngle) * r * 1.05;
-      node.y3 = trunkBaseY + Math.sin(node.targetAngle) * r * 0.85;
+      node.x3 = cx + Math.cos(node.targetAngle + sweepSide * 0.25) * sweepDist;
+      node.y3 = cy - 120 + Math.sin(node.targetAngle) * sweepDist * 0.7;
+      return;
     }
+
+    const r = originLead + node.depth * depthRadiusStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
+    node.x3 = cx + Math.cos(node.targetAngle) * r * 1.05;
+    node.y3 = cy + Math.sin(node.targetAngle) * r * 0.85;
   });
 
   // 6. Compute S-Curved Branch Geometry (Part B - Step 8) from root down to leaves
@@ -214,11 +231,24 @@ export function buildBotanicalLayout(treeData, options = {}) {
     }
 
     const parent = node.parent;
-    node.x0 = parent.x3;
-    node.y0 = parent.y3;
+    const isLimbRoot = node.depth === 1 && !node.data.isTrunkLineage && node.limbOrigin;
+
+    let startTangent;
+    if (isLimbRoot) {
+      // Fix 1: limb grows from its own trunk attachment, not the apex
+      node.x0 = node.limbOrigin.x;
+      node.y0 = node.limbOrigin.y;
+      // Trunk is thicker lower down: interpolate base→tip width at the attach height
+      node.baseWidth = rootBaseWidth + (root.tipWidth - rootBaseWidth) * node.limbOrigin.frac;
+      startTangent = node.limbOrigin.entryTangent;
+    } else {
+      node.x0 = parent.x3;
+      node.y0 = parent.y3;
+      node.baseWidth = parent.tipWidth;
+      startTangent = parent.exitTangent;
+    }
 
     // Width tapering
-    node.baseWidth = parent.tipWidth;
     const parentSize = parent.subtreeSize || 1;
     const childSize = node.subtreeSize || 1;
     node.tipWidth = Math.max(
@@ -227,7 +257,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
     );
 
     // Compute S-curve Bézier control points
-    computeSCurveSpineGeometry(node, parent.exitTangent);
+    computeSCurveSpineGeometry(node, startTangent);
   });
 
   return {
@@ -238,8 +268,70 @@ export function buildBotanicalLayout(treeData, options = {}) {
     orderedLeaves,
     N,
     R_min: Math.round(R_min),
-    baseCanopyRadius: Math.round(baseCanopyRadius)
+    baseCanopyRadius: Math.round(baseCanopyRadius),
+    attachments,
+    radialBands,
+    depthRadiusStep,
+    sector: { rightmostAngle, leftmostAngle, sectorSpanDeg },
+    layoutOpts: { width, height, trunkBaseY, trunkCenterX, rootTrunkLength, rootBaseWidth }
   };
+}
+
+/**
+ * Fix 1: Depth-1 limbs attach along the trunk at 35%–100% of its length.
+ * Most lateral / downward-leaning limbs attach lowest; most vertical at the apex.
+ * Deterministic: sort keyed on mean child angle with id tie-break, jitter seeded on id.
+ */
+export function assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrunkLength }) {
+  const limbs = (root.children || []).filter(c => !c.data.isTrunkLineage);
+  if (limbs.length === 0) return [];
+
+  const laterality = limb => {
+    const dev = Math.abs(normalizeSignedAngle(limb.targetAngle + Math.PI / 2));
+    const beyondHorizontal = Math.max(0, dev - Math.PI / 2);
+    return dev + 0.75 * beyondHorizontal; // downward lean weighted extra
+  };
+
+  // Most lateral first → attaches lowest
+  const sorted = limbs.slice().sort((a, b) =>
+    (laterality(b) - laterality(a)) || (a.data.id < b.data.id ? -1 : 1)
+  );
+
+  const attachments = [];
+  sorted.forEach((limb, i) => {
+    let frac = sorted.length === 1 ? 1.0 : 0.35 + (i / (sorted.length - 1)) * 0.65;
+    frac += (seedHash(limb.data.id + '_attach') - 0.5) * 0.06;
+    frac = Math.max(0.35, Math.min(1.0, frac));
+
+    // Leave the trunk partway between vertical and the limb's own heading
+    const dev = normalizeSignedAngle(limb.targetAngle + Math.PI / 2);
+    const entryTangent = -Math.PI / 2 + 0.6 * dev;
+
+    limb.limbOrigin = {
+      x: trunkCenterX,
+      y: trunkBaseY - frac * rootTrunkLength,
+      frac,
+      entryTangent
+    };
+
+    attachments.push({
+      id: limb.data.id,
+      name: limb.data.name,
+      frac: +frac.toFixed(3),
+      x: limb.limbOrigin.x,
+      y: Math.round(limb.limbOrigin.y),
+      meanAngleDeg: Math.round((limb.targetAngle * 180) / Math.PI),
+      subtreeSize: limb.subtreeSize
+    });
+  });
+
+  return attachments;
+}
+
+function normalizeSignedAngle(a) {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  return a;
 }
 
 /**

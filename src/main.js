@@ -9,6 +9,7 @@ import { LineageTracer } from './lineageTracer.js';
 import { normalizeArabic, buildLineageChain } from './arabicNormalizer.js';
 import { initGrowthAnimation } from './growthAnimation.js';
 import { generateSyntheticTree } from './syntheticData.js';
+import { computeLayoutMetrics } from './layoutMetrics.js';
 
 let activeTreeData = rawTreeData;
 let layoutResult = null;
@@ -198,6 +199,87 @@ function renderTree(treeData) {
 
   const initialStatus = quadtreeCuller.updateViewport(cameraObj.initialTransform, window.innerWidth, window.innerHeight);
   updateProfilerUI(initialStatus, descendants.length);
+
+  // 8. Layout Self-Metrics (headless-reproducible; read via window.__treeMetrics or console)
+  const metrics = computeLayoutMetrics(layoutResult);
+  window.__treeMetrics = metrics;
+  console.log('[TREE METRICS]', JSON.stringify(metrics, null, 2));
+
+  // Dev hook: position camera at world point (cx, cy) at scale k (verification tooling)
+  window.__setView = (cx, cy, k) => {
+    const t = d3.zoomIdentity
+      .translate(window.innerWidth / 2 - cx * k, window.innerHeight / 2 - cy * k)
+      .scale(k);
+    cameraObj.svg.call(cameraObj.zoom.transform, t);
+  };
+
+  // 9. Debug Overlay (attachment points, canopy bands, sector rays, grass line)
+  renderDebugOverlay(layoutResult);
+}
+
+/**
+ * Debug Overlay — makes layout distribution problems visible at a glance.
+ * Toggled by #btn-debug; drawn in world coordinates inside the zoom container.
+ */
+function renderDebugOverlay(layout) {
+  const layer = document.getElementById('debug-layer');
+  layer.innerHTML = '';
+  const NS = 'http://www.w3.org/2000/svg';
+  const { trunkBaseY, trunkCenterX } = layout.layoutOpts;
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS(NS, tag);
+    Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+    return el;
+  };
+
+  // Grass line
+  layer.appendChild(mk('line', {
+    x1: trunkCenterX - 1500, y1: trunkBaseY, x2: trunkCenterX + 1500, y2: trunkBaseY,
+    stroke: '#2D6A4F', 'stroke-width': 3, 'stroke-dasharray': '14 8'
+  }));
+
+  // Sector boundary rays
+  [layout.sector.rightmostAngle, layout.sector.leftmostAngle].forEach(a => {
+    layer.appendChild(mk('line', {
+      x1: trunkCenterX, y1: trunkBaseY,
+      x2: trunkCenterX + Math.cos(a) * 1600, y2: trunkBaseY + Math.sin(a) * 1600,
+      stroke: '#E67E22', 'stroke-width': 2, 'stroke-dasharray': '6 6'
+    }));
+  });
+
+  // Canopy band ellipses (reference frame: trunk base)
+  layout.radialBands.forEach(mult => {
+    layer.appendChild(mk('ellipse', {
+      cx: trunkCenterX, cy: trunkBaseY,
+      rx: layout.baseCanopyRadius * mult * 1.05,
+      ry: layout.baseCanopyRadius * mult * 0.85,
+      fill: 'none', stroke: '#8E44AD', 'stroke-width': 1.5, 'stroke-dasharray': '4 8', opacity: 0.6
+    }));
+  });
+
+  // Depth-1 limb attachment points
+  (layout.attachments || []).forEach(att => {
+    layer.appendChild(mk('circle', {
+      cx: att.x, cy: att.y, r: 12,
+      fill: '#E91E63', stroke: '#FFFFFF', 'stroke-width': 2.5
+    }));
+    const label = mk('text', {
+      x: att.x + 20, y: att.y + 4, 'font-size': '20px', fill: '#E91E63',
+      'font-weight': '700', 'text-anchor': 'start'
+    });
+    label.textContent = `${att.id} @${Math.round(att.frac * 100)}%`;
+    layer.appendChild(label);
+  });
+
+  // Trunk-lineage node positions (limb origins for deeper side-subtrees)
+  layout.root.descendants()
+    .filter(n => n.data.isTrunkLineage && n.depth > 0)
+    .forEach(n => {
+      layer.appendChild(mk('rect', {
+        x: n.x3 - 8, y: n.y3 - 8, width: 16, height: 16,
+        fill: 'none', stroke: '#E91E63', 'stroke-width': 2.5
+      }));
+    });
 }
 
 /**
@@ -315,6 +397,16 @@ function setupButtonListeners() {
   btnProfiler.addEventListener('click', () => {
     profilerCard.classList.toggle('active');
   });
+
+  const btnDebug = document.getElementById('btn-debug');
+  if (btnDebug) {
+    btnDebug.addEventListener('click', () => {
+      const layer = document.getElementById('debug-layer');
+      const showing = layer.style.display !== 'none';
+      layer.style.display = showing ? 'none' : '';
+      btnDebug.style.borderColor = showing ? '' : '#E91E63';
+    });
+  }
 }
 
 // App Initialization
