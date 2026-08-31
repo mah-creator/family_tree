@@ -84,7 +84,7 @@ an in-app Browser pane with a `preview_start` tool pointed at the
 | # | What | Status |
 |---|------|--------|
 | 1 | Single-origin limbs → per-limb trunk attachment | **Landed + visually confirmed** |
-| 2 | Sector widened to 230° | **Untouched** |
+| 2 | Sector widened to 230° | **Landed + visually confirmed** |
 | 3 | Size-aware radial bands + variable depth step | **Untouched** — design decided (see §5), not coded |
 | — | Leaf clusters (3 leaves/twig, shared parent twig) | **Untouched** — design decided (see §5), lands together with fix 3 |
 | 4 | Wedge containment for branch curves | **Untouched** |
@@ -107,8 +107,21 @@ as a file on disk — they were inline images in that session's chat — so if
 you want to re-confirm, re-run the same steps (§8 gives the exact recipe) and
 compare by eye against what's described here and against the PDF. The overall
 canopy is still a rough fountain/fan shape at this point, not the lumpy
-asymmetric silhouette from the reference — that's expected, since fixes 2, 3,
+asymmetric silhouette from the reference — that's expected, since fixes 3
 and 4/5 haven't landed yet.
+
+Fix 2 ("landed + visually confirmed"): `sectorSpanDeg` changed 155→230 at
+[src/treeLayout.js:77](src/treeLayout.js#L77). A debug-overlay screenshot at
+`window.__setView(1800, 2350, 0.45)` showed the orange dashed sector-boundary
+rays now dipping visibly past horizontal on both the bottom-left and
+bottom-right, with branches leaning down beside the trunk instead of
+stopping dead at horizontal — matches the fix's intent. The green dashed
+grass line showed no leaf crossing it, confirming the existing flat clamp
+(`node.y3 = trunkBaseY - 100` cap, line 208) still holds correctly with the
+wider sector — no change was needed there after all (§4's "Fix 2" section
+originally flagged this as needing review; it turned out fine as-is, since
+the clamp is expressed in absolute world Y tied to `trunkBaseY`, not
+relative to any particular limb origin).
 
 ### Current headless metrics (run `node scripts/report_metrics.mjs` to
 reproduce — this is the ground truth, re-run it after every change)
@@ -116,26 +129,34 @@ reproduce — this is the ground truth, re-run it after every change)
 ```json
 {
   "totalLeaves": 117,
-  "leafPairCollisions": 4,
-  "branchPairCollisions": 90,
-  "R_min": 662,
+  "leafPairCollisions": 24,
+  "branchPairCollisions": 102,
+  "R_min": 446,
   "radiusUsed": 1150,
-  "canopyFillPct": 11.8,
+  "canopyFillPct": 8,
   "leftFlankFillPct": 0,
   "rightFlankFillPct": 0
 }
 ```
 
-Read these numbers as: leaf collisions are already low (4) because 117 leaves
-spread across a big fixed-radius canopy rarely land on top of each other by
-chance; branch collisions are high (90) because nothing constrains branch
-curves to their own wedge yet (that's fix 4) and there's no relaxation (fix
-5); flank fill is 0% because fix 2 (sector widening) and fix 3 (size-aware
-radial bands) haven't happened, so nothing yet occupies the space beside the
-trunk. Expect `leafPairCollisions` and `branchPairCollisions` to move (in
-either direction) as later fixes land — don't chase these specific numbers
-back to zero before fix 5 is implemented; they're only meaningful read
-together with which fixes are done.
+These are post-fix-2 numbers (previously, post-fix-1-only: `R_min` 662,
+`leafPairCollisions` 4, `branchPairCollisions` 90, `canopyFillPct` 11.8 — see
+git history on `src/treeLayout.js` if you want the exact prior state).
+`R_min` dropped as expected — a wider sector needs less radius for the same
+minimum arc-length spacing between leaves. `leafPairCollisions` and
+`branchPairCollisions` both *rose* — this is expected collateral, not a
+regression: arc allocation still assigns angle purely from each leaf's
+global right-to-left index, the same physical angle regardless of which
+limb's origin it's actually placed around (fix 1 gave each limb its own
+*origin point*, but did not change how *angle* is assigned), so a wider
+angular spread increases the chance that two leaves belonging to different
+limbs — placed around origins that differ in Y along the trunk but share the
+same X — land close together in absolute world space. Fix 4/5 (wedge
+containment + relaxation) is what actually resolves this; don't chase these
+numbers down before then. `leftFlankFillPct`/`rightFlankFillPct` are still
+0% — expected, since nothing yet targets leaf *density* at the flanks
+specifically (arc allocation still uses the old fixed-radius-band model);
+that's fix 3's job, not fix 2's.
 
 ---
 
@@ -288,7 +309,7 @@ specifically so the embedded font doesn't get split out as a separate file.
 
 ## 4. The full fix list with landing spots
 
-All line numbers below are current as of commit `4b31c6b` on this branch.
+All line numbers below are current as of commit `14a730d` on this branch.
 Re-check them if you've made edits since reading this — they will drift.
 
 ### Fix 1 — Single origin (LANDED)
@@ -324,45 +345,40 @@ trunk's straight-up exit tangent.
 `attachments` array (four entries, `p002`/`p003`/`p005`/`p004` at 35%/57%/
 76%/100%).
 
-### Fix 2 — Sector can't reach below horizontal (UNTOUCHED)
+### Fix 2 — Sector can't reach below horizontal (LANDED)
 
-**Is:** `sectorSpanDeg` defaults to `155` at
+**Was:** `sectorSpanDeg` defaulted to `155` at
 [src/treeLayout.js:77](src/treeLayout.js#L77). Combined with the sector
-center at `-π/2` (straight up), the arc spans from `rightmostAngle` to
+center at `-π/2` (straight up), the arc spanned from `rightmostAngle` to
 `leftmostAngle` computed at
-[src/treeLayout.js:113-115](src/treeLayout.js#L113-L115) — currently
-−167.5° to −12.5° in standard math convention (SVG y-axis points down, so
-these are measured the same way atan2 would report them; −90° is straight
-up, 0°/−180° are horizontal). The sector can't dip below horizontal on
-either side, so small lateral lineages can't lean down beside the trunk —
-that's part of why the flanks read empty.
+[src/treeLayout.js:113-115](src/treeLayout.js#L113-L115) — −167.5° to −12.5°
+in standard math convention (SVG y-axis points down, so these are measured
+the same way atan2 would report them; −90° is straight up, 0°/−180° are
+horizontal). The sector couldn't dip below horizontal on either side, so
+small lateral lineages couldn't lean down beside the trunk — part of why the
+flanks read empty.
 
-**Fix to make:** Change `sectorSpanDeg` to `230`. Sector center stays at
-`-π/2`; the brief specifies the new start as `-π/2 - 115°` — check that
-lands you at the same ±115° half-span the 230° total implies (it should,
-115° × 2 = 230°). Outer edges then reach roughly 25° past horizontal on each
-side. `R_min` ([src/treeLayout.js:118](src/treeLayout.js#L118)) already has
-`sectorWidthRad` in its denominator, so it recomputes automatically — no
-separate change needed there, just verify the printed `R_min` moved down
-after you widen the sector (wider sector ⇒ leaves need less radius to reach
-the same minimum arc-length spacing).
+**Fix, as implemented:** `sectorSpanDeg` changed `155` → `230`
+([src/treeLayout.js:77](src/treeLayout.js#L77)). `rightmostAngle` /
+`leftmostAngle` ([src/treeLayout.js:113-118](src/treeLayout.js#L113-L118))
+recompute automatically from it (no separate change needed — `sectorWidthRad`
+was already in `R_min`'s denominator), now spanning roughly 25° past
+horizontal on each side. Comments referencing the old 155°/−8.5°/−171.5°
+values were updated to match.
 
-**Also touch:** The leaf-y grass clamp at
+**Grass clamp — investigated, no change needed:** The leaf-y clamp at
 [src/treeLayout.js:208](src/treeLayout.js#L208) (`if (node.y3 > trunkBaseY -
-100) node.y3 = trunkBaseY - 100;`) is a flat, single-value clamp left over
-from when everything radiated from one center. Once the sector reaches past
-horizontal, leaves near the sector edges will have `y3` values that this
-flat clamp doesn't correctly protect against dipping below the grass line
-for all limb origins (limb origins aren't all at `trunkBaseY` anymore after
-fix 1 — some are higher up the trunk). Rework this clamp to reference each
-leaf's actual `y3` against the real grass line (`trunkBaseY` in world
-coordinates, same constant, but think through whether the clamp needs to
-account for the leaf's owning limb's origin height too, since a leaf on a
-limb attached at 35% height starts its polar sweep from a point already
-above the grass — you may find the existing flat clamp is still fine in
-practice once you check the actual numbers; don't change it blind).
+100) node.y3 = trunkBaseY - 100;`) looked like it might need reworking to
+account for per-limb origin height, since limb origins aren't all at
+`trunkBaseY` after fix 1. In practice it didn't: the clamp is expressed in
+absolute world Y tied to the fixed `trunkBaseY` constant, not relative to
+any limb's origin, so it correctly caps *every* leaf's final Y regardless of
+which limb or origin height produced it. Verified via debug-overlay
+screenshot at `window.__setView(1800, 2350, 0.45)` — no leaf crosses the
+green dashed grass line even with the sector now reaching past horizontal.
 
-**Status:** Not started.
+**Status:** Landed, visually confirmed (see §2 for the screenshot
+description and updated metrics — `R_min` 662→446).
 
 ### Fix 3 — Radial position ignores lineage size (UNTOUCHED, design decided)
 
@@ -892,26 +908,47 @@ something looks wrong.
 
 ## 9. Immediate next action
 
-**Implement fix 2** (widen the sector to 230°, re-derive the grass clamp —
-full detail in §4's "Fix 2" section above). It's the smallest of the
-remaining fixes (one constant change plus a clamp review, versus fix 3's
-twig-indexing rework or fix 4/5's wedge-and-relaxation work), it's next in
-the established checkpoint order, and its effect is directly visible in the
-debug overlay's sector-ray lines — you'll be able to tell immediately
-whether it worked by whether the orange dashed rays in the `#btn-debug`
-overlay now dip below horizontal on both sides of the trunk.
-
-After making the change: rebuild (`npm run build`), re-run
-`node scripts/report_metrics.mjs` and compare `R_min` against the current
-662 (§2) — it should drop, since a wider sector needs less radius for the
-same minimum leaf spacing — then take a screenshot per §8 and check the
-flank-fill percentages (`leftFlankFillPct` / `rightFlankFillPct`, currently
-both 0 — §2) started moving off zero. They won't reach anything like their
-final values yet (fix 3's size-aware banding is what actually fills the
-flanks with content), but they should stop being exactly zero once leaves
-can occupy angles past horizontal.
-
-Then move to fix 3 + leaf clusters together, per the design already decided
-in §5 — don't implement fix 3's band-mapping logic against the current
+Fixes 1 and 2 are both landed and visually confirmed (§2). **Implement fix 3
+together with leaf clustering**, per the design already decided in §5 — do
+not implement fix 3's band-mapping logic against the current
 117-independent-leaves model and expect to reuse that tuning after adding
-clusters; §5 explains why that doesn't work.
+clusters; §5 explains why that doesn't work (clustering changes what `N` —
+the count driving `R_min` and arc allocation — actually means, from 117
+leaves to roughly 40 twigs).
+
+This is the largest remaining piece of work before fix 4/5. Concretely, in
+order (full detail in §4's "Fix 3" section):
+
+1. Write the twig-grouping logic: for internal nodes whose children are all
+   terminal leaves, group those leaf-children into twigs of up to 3, with
+   per-leaf angular offsets around the twig's angle (alternating sides) and
+   attachment at `t = 0.55 / 0.78 / 1.0` along the twig's own spine.
+2. Rework `collectOrderedLeaves` (or add a sibling function) so `N` counts
+   twigs, not leaves, and `R_min` / the angle-allocation loop
+   ([src/treeLayout.js:118](src/treeLayout.js#L118),
+   [src/treeLayout.js:124-144](src/treeLayout.js#L124-L144)) index by twig.
+3. Replace the `idx % 3` radial-band lookup
+   ([src/treeLayout.js:134](src/treeLayout.js#L134)) with one derived from
+   the depth-1 ancestor's `subtreeSize` (large lineages → outer bands, small
+   → inner), keeping light `% 3`-style texture within a lineage.
+4. Replace the fixed `depthRadiusStep`
+   ([src/treeLayout.js:148](src/treeLayout.js#L148), applied at
+   [src/treeLayout.js:221](src/treeLayout.js#L221)) with
+   `step = availableRadialSpan / subtreeHeight` per node, so short lineages
+   stop near their limb origin instead of being stretched to match deeper
+   siblings.
+5. In `src/leafRenderer.js`, add whatever's needed to render a twig's 2–3
+   leaves at their individual anchor points while keeping the text-nested-
+   inside-rotated-group pattern intact (§7 — must not regress).
+6. Set `node.clusterId` on sibling leaves sharing a twig — this makes
+   `layoutMetrics.js`'s existing collision-exemption logic (§3) start
+   working for free, and is also what will let you report `twigPairCollisions`
+   separately from `leafPairCollisions` per §8's protocol once you get to a
+   checkpoint screenshot.
+
+After the change: rebuild, run `node scripts/report_metrics.mjs`, and expect
+`leftFlankFillPct`/`rightFlankFillPct` to move meaningfully off 0 for the
+first time (currently 0/0 — §2) since this is the fix that actually targets
+leaf density at the flanks, not just the angular range fix 2 opened up.
+`leafPairCollisions`/`branchPairCollisions` may still be nonzero — that's
+still expected until fix 4/5.
