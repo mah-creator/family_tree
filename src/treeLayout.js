@@ -49,6 +49,8 @@ export function computeSubtreeSizes(root) {
 const TWIG_T_BY_COUNT = { 1: [1.0], 2: [0.7, 1.0], 3: [0.45, 0.72, 1.0] };
 const TWIG_MIN_SPACING_PX = 40;
 const TWIG_LEAF_HEIGHT_PX = 22;
+// Minimum radial advance of a leaf past its own parent (fix 3).
+const MIN_LEAF_ADVANCE_PX = 70;
 
 function minConsecutiveDiff(arr) {
   let min = Infinity;
@@ -128,6 +130,60 @@ export function collectOrderedTwigs(root) {
 }
 
 /**
+ * Fix 3: ranks each depth-1 lineage by its own leaf count (subtreeSize) into
+ * one of the 3 radial-band tiers (large lineage -> outer, small -> inner),
+ * and derives ONE global per-generation radial step from the deepest
+ * lineage's own height. Every node's radius (leaf and internal alike) is
+ * now built from relativeDepth * globalStep — the same base quantity for
+ * both — closing the gap between two independently-tuned formulas that
+ * could previously coincide near zero (see the MIN_BASE_LEN note in the
+ * leaf-placement block below).
+ */
+function computeLineageInfo(root, availableRadialSpan, radialBands) {
+  const depth1Nodes = root.children || [];
+  const infoById = new Map();
+  if (depth1Nodes.length === 0) {
+    return { infoById, globalStep: availableRadialSpan };
+  }
+
+  // The deepest lineage's leaves must land at (not inside) the canopy radius
+  // R_min was computed for — dividing the span by maxHeight, not maxHeight+1,
+  // is what puts the last generation ON the rim rather than one step short of
+  // it. Getting this wrong silently violates R_min's tangential-spacing
+  // guarantee (leaves packed inside the radius that guarantee assumed).
+  const maxHeight = Math.max(1, ...depth1Nodes.map(n => n.height || 0));
+  const globalStep = availableRadialSpan / maxHeight;
+
+  const sortedBySize = depth1Nodes.slice().sort((a, b) => (a.subtreeSize || 1) - (b.subtreeSize || 1));
+  sortedBySize.forEach((node, rank) => {
+    const tierIndex = Math.min(2, Math.floor((rank / sortedBySize.length) * 3));
+    // The tier scales the lineage's whole PER-GENERATION step, not just its
+    // final one: a small lineage genuinely terminates closer to the trunk
+    // (which is what fills the flanks) instead of merely ending a few px
+    // short of a big one. Applying it per-step rather than to the whole
+    // accumulated radius is what keeps a leaf from landing behind its own
+    // parent — internal nodes in the same lineage use this identical step.
+    infoById.set(node.data.id, {
+      tierIndex,
+      step: globalStep * radialBands[tierIndex],
+      height: node.height || 0,
+      subtreeSize: node.subtreeSize || 1
+    });
+  });
+
+  return { infoById, globalStep };
+}
+
+function lineageStepFor(node, lineageInfoById, globalStep) {
+  const info = lineageInfoById.get(findDepth1Ancestor(node).data.id);
+  return info ? info.step : globalStep;
+}
+
+function findDepth1Ancestor(node) {
+  return node.ancestors().find(a => a.depth === 1) || node;
+}
+
+/**
  * Main Botanical Layout Engine — Leaf-Indexed Arc Allocation (Reingold-Tilford in Polar Form)
  */
 export function buildBotanicalLayout(treeData, options = {}) {
@@ -188,10 +244,37 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // not 34, or angular slots would be spaced for a single leaf and quietly
   // collide once clusters exist.
   const R_min = (52 * N) / (3 * sectorWidthRad * 0.74);
-  const baseCanopyRadius = Math.max(R_min / 0.74 + 180, 1150);
+  // Fix 3: dropped the flat 1150 floor — a single global minimum stopped
+  // making sense once radial reach became per-lineage (below); baseCanopyRadius
+  // is now purely R_min-derived (the angular-slot tangential-spacing guarantee
+  // it still needs to satisfy).
+  const baseCanopyRadius = R_min / 0.74 + 180;
 
-  // 4. Part A - Step 2 & 3: Place Twigs by Index into 3 Radial Bands with Irregular Silhouette
+  // 4. Part A - Step 2 & 3: Place Twigs by Index into Size-Aware Radial Bands
+  // with Irregular Silhouette. Fix 3: band tier now comes from the twig's
+  // depth-1 lineage's own subtreeSize (large lineage -> outer band, small ->
+  // inner), not raw index parity; a light per-lineage %3 texture keeps it
+  // from looking robotically banded. Radius itself is now generations-below-
+  // lineage-root * one shared per-generation step (computeLineageInfo) — the
+  // same base quantity the internal-node formula below uses, instead of a
+  // canopy-wide value computed independently of depth.
   const radialBands = [0.74, 0.94, 1.14];
+  // Full canopy radius, not the old 0.65 fraction of it: the fraction was
+  // tuned when leaf radius was computed independently of this span, and
+  // keeping it here left the outermost leaves short of R_min.
+  const availableRadialSpan = baseCanopyRadius;
+  const { infoById: lineageInfoById, globalStep } = computeLineageInfo(root, availableRadialSpan, radialBands);
+
+  const lineageLocalIdx = new Map(); // twig.id -> index within its own lineage's twig sequence
+  {
+    const counters = new Map();
+    orderedTwigs.forEach(twig => {
+      const key = findDepth1Ancestor(twig.representative).data.id;
+      const localIdx = counters.get(key) || 0;
+      lineageLocalIdx.set(twig.id, localIdx);
+      counters.set(key, localIdx + 1);
+    });
+  }
 
   orderedTwigs.forEach((twig, idx) => {
     const repNode = twig.representative;
@@ -202,19 +285,43 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
     // Part B - Step 11: Irregular Silhouette Noise (±15%)
     const noise = silhouetteNoise(baseAngle);
-    const effectiveRadius = baseCanopyRadius * (1.0 + noise);
 
-    // Part A - Step 2: Radial Banding (band = idx % 3)
-    const band = idx % 3;
-    const bandMultiplier = radialBands[band];
+    // Fix 3: radial reach driven by the lineage's own size-tiered step
+    // (computeLineageInfo) — small lineages terminate near the trunk, large
+    // ones reach the rim — with the same step the internal nodes of this
+    // lineage use, so a leaf can never land behind its own parent.
+    const depth1Ancestor = findDepth1Ancestor(repNode);
+    const step = lineageStepFor(repNode, lineageInfoById, globalStep);
+    const relativeDepth = repNode.depth - depth1Ancestor.depth;
+
+    // Radial bands, applied per-twig WITHIN the lineage (not by global index
+    // parity as before fix 3). This spread is what actually fills the flanks:
+    // R_min's spacing guarantee assumes twigs occupy 3 distinct radii per
+    // angular slot, so collapsing every twig in a lineage onto one radius
+    // (they all sit at the same depth) leaves the inner canopy structurally
+    // empty no matter how the lineage tier is tuned.
+    const localIdx = lineageLocalIdx.get(twig.id) || 0;
+    const bandMultiplier = radialBands[localIdx % 3];
 
     // Part A - Step 6: Organic ±12% length jitter seeded off node id
     const jitter = (seedHash(repNode.data.id + '_rad') - 0.5) * 0.24; // ±12%
-    const leafRadius = effectiveRadius * bandMultiplier * (1 + jitter);
+    const rawRadius = relativeDepth * step * bandMultiplier * (1 + noise) * (1 + jitter);
+
+    // Explicit clearance past this leaf's own parent. Band + noise + jitter
+    // can otherwise multiply a leaf's whole accumulated radius down below its
+    // parent's (7.9px gaps in ~36% of twigs when this was unguarded), which
+    // then fed a near-zero vector into the twig-length scaling below. Stating
+    // the invariant here — a leaf always sits at least one useful step past
+    // its parent — is what makes that downstream floor a true edge-case
+    // guard rather than the thing holding the layout together.
+    const parentRadius = Math.max(0, relativeDepth - 1) * step;
+    const leafRadius = Math.max(rawRadius, parentRadius + MIN_LEAF_ADVANCE_PX);
 
     repNode.targetAngle = baseAngle;
     repNode.targetRadius = leafRadius;
-    // World coordinates computed later from the owning limb's origin (Fix 1)
+    // originLead (limb-attachment height compensation) is added later, in
+    // the position pass, once limbOrigin is known — see the leaf-placement
+    // block below.
 
     // Other twig members share the representative's angle (needed by the
     // ancestor angle-averaging pass below); their own position comes later
@@ -288,9 +395,11 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
     if (!node.children || node.children.length === 0) {
       // Terminal leaf (twig representative): polar placement around the
-      // owning limb origin
-      let x3 = cx + Math.cos(node.targetAngle) * node.targetRadius * 1.05;
-      let y3 = cy + Math.sin(node.targetAngle) * node.targetRadius * 0.85;
+      // owning limb origin. originLead compensates for where along the
+      // trunk this limb attaches (Fix 1); node.targetRadius is the
+      // depth-based-plus-band radius computed above (Fix 3).
+      let x3 = cx + Math.cos(node.targetAngle) * (originLead + node.targetRadius) * 1.05;
+      let y3 = cy + Math.sin(node.targetAngle) * (originLead + node.targetRadius) * 0.85;
 
       // Cluster fix: scale the twig's own length (parent tip -> this node)
       // with member count, so a multi-leaf cluster has room along the spine.
@@ -305,16 +414,19 @@ export function buildBotanicalLayout(treeData, options = {}) {
         const naturalDx = x3 - px, naturalDy = y3 - py;
         const naturalLen = Math.hypot(naturalDx, naturalDy);
 
-        // The "natural" parent->leaf vector can be degenerately short (the
-        // leaf's own polar radius and the parent's depth-based radius can
-        // nearly coincide for some nodes — a rough edge of the pre-existing
-        // radius formulas, not something this fix should amplify). Below a
-        // floor, both its length AND its direction are unreliable, so fall
-        // back to a stable direction (targetAngle, same aspect convention
-        // used above) and a stable minimum base length instead of scaling a
-        // near-zero vector — a small naturalLen otherwise turns into a huge
-        // multiplier and catapults the branch far outside the canopy.
-        const MIN_BASE_LEN = 60;
+        // Guard against a degenerately short natural parent->leaf vector,
+        // whose direction is as unreliable as its length (scaling a near-zero
+        // vector by the required-length ratio produces a huge multiplier and
+        // throws the branch outside the canopy). Fix 3 made this rare rather
+        // than routine: when leaf radius was a full multiplicative
+        // attenuation of the whole accumulated depth, 23/63 twigs fell under
+        // 60px (worst 7.9px); with band/noise/jitter now modulating only the
+        // last generation's step, the worst case is ~51px and only 4 twigs
+        // sit under 60. Kept as a genuine floor at 40px (aligned with
+        // TWIG_MIN_SPACING_PX) rather than a band-aid over a broken formula —
+        // it no longer fires for any current node, but a differently-shaped
+        // tree could still produce a near-zero vector here.
+        const MIN_BASE_LEN = 40;
         let dirX, dirY, baseLen;
         if (naturalLen < MIN_BASE_LEN) {
           const rawX = Math.cos(node.targetAngle) * 1.05;
@@ -358,7 +470,14 @@ export function buildBotanicalLayout(treeData, options = {}) {
       return;
     }
 
-    const r = originLead + node.depth * depthRadiusStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
+    // Fix 3: relative-to-lineage depth (not absolute tree depth) * the same
+    // globalStep the leaf radius above uses — a lineage hanging off a trunk
+    // node no longer inherits that trunk node's own traversal depth as if it
+    // were generations of its own.
+    const internalDepth1Ancestor = findDepth1Ancestor(node);
+    const internalRelativeDepth = node.depth - internalDepth1Ancestor.depth;
+    const internalStep = lineageStepFor(node, lineageInfoById, globalStep);
+    const r = originLead + internalRelativeDepth * internalStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
     node.x3 = cx + Math.cos(node.targetAngle) * r * 1.05;
     node.y3 = cy + Math.sin(node.targetAngle) * r * 0.85;
   });
@@ -408,7 +527,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
   // 7. Cluster fix: position non-representative twig members by sampling
   // each twig's now-finished spine (must run after the geometry pass above)
-  applyTwigMemberSampling(orderedTwigs, trunkBaseY - 100);
+  const xStretchTriggerCount = applyTwigMemberSampling(orderedTwigs, trunkBaseY - 100);
 
   return {
     root,
@@ -420,6 +539,8 @@ export function buildBotanicalLayout(treeData, options = {}) {
     N,
     R_min: Math.round(R_min),
     baseCanopyRadius: Math.round(baseCanopyRadius),
+    globalStep: Math.round(globalStep),
+    xStretchTriggerCount,
     attachments,
     radialBands,
     depthRadiusStep,
@@ -451,6 +572,7 @@ function sampleCubicBezier(p0, p1, p2, p3, t) {
  * nudge — it sits exactly at the branch tip.
  */
 function applyTwigMemberSampling(twigs, grassClampY) {
+  let xStretchTriggerCount = 0;
   twigs.forEach(twig => {
     const { members, representative: rep } = twig;
     if (members.length <= 1) {
@@ -497,7 +619,10 @@ function applyTwigMemberSampling(twigs, grassClampY) {
       // whatever X-spread happened to survive. Y is already correctly
       // clamped and must not move; restore the floor by stretching members
       // along X around their shared centroid instead (safe here since the
-      // clamped case is effectively colinear along X).
+      // clamped case is effectively colinear along X). This breaks the
+      // spine-anchoring invariant for the affected twig — tracked below so
+      // it stays visible in metrics rather than silently firing.
+      xStretchTriggerCount++;
       const cx = members.reduce((sum, m) => sum + m.x3, 0) / members.length;
       const stretch = (TWIG_MIN_SPACING_PX * 1.1) / Math.max(minGap, 1);
       members.forEach(m => { m.x3 = cx + (m.x3 - cx) * stretch; m.x = m.x3; });
@@ -512,6 +637,7 @@ function applyTwigMemberSampling(twigs, grassClampY) {
 
     twig.minMemberSpacing = minGap;
   });
+  return xStretchTriggerCount;
 }
 
 /**

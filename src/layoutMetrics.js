@@ -23,8 +23,16 @@ function bezierPoint(p0, p1, p2, p3, t) {
   };
 }
 
+function bezierDeriv(p0, p1, p2, p3, t) {
+  const mt = 1 - t;
+  return {
+    x: 3 * mt * mt * (p1.x - p0.x) + 6 * mt * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x),
+    y: 3 * mt * mt * (p1.y - p0.y) + 6 * mt * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y)
+  };
+}
+
 export function computeLayoutMetrics(layoutResult) {
-  const { root, R_min, baseCanopyRadius, layoutOpts, attachments, orderedTwigs, N } = layoutResult;
+  const { root, R_min, baseCanopyRadius, layoutOpts, attachments, orderedTwigs, N, xStretchTriggerCount } = layoutResult;
   const { trunkBaseY, trunkCenterX } = layoutOpts;
   const descendants = root.descendants();
 
@@ -122,19 +130,6 @@ export function computeLayoutMetrics(layoutResult) {
     }
   }
 
-  // Flanks: the two regions beside the trunk that read as empty in the broken layout
-  const flankFill = (x0, x1) => {
-    const y0 = trunkBaseY - 520, y1 = trunkBaseY - 80;
-    let total = 0, filled = 0;
-    for (let gx = Math.floor(x0 / FILL_CELL); gx <= Math.floor(x1 / FILL_CELL); gx++) {
-      for (let gy = Math.floor(y0 / FILL_CELL); gy <= Math.floor(y1 / FILL_CELL); gy++) {
-        total++;
-        if (occupied.has(`${gx},${gy}`)) filled++;
-      }
-    }
-    return total ? +(100 * filled / total).toFixed(1) : 0;
-  };
-
   // ---------- 4. Twig-cluster spacing ----------
   // Minimum along-twig spacing actually achieved across every multi-member
   // twig (computed by applyTwigMemberSampling in treeLayout.js). Must stay
@@ -147,17 +142,84 @@ export function computeLayoutMetrics(layoutResult) {
     ? Math.round(Math.min(...multiMemberSpacings) * 10) / 10
     : null;
 
+  // ---------- 5. Branch shape health: curls & below-ground ----------
+  // curlCount: branches whose tangent direction turns >150° in total along
+  // the spine — a visible self-curl (fix 4's wedge clamp should zero this).
+  // branchesBelowTrunkBase: any spine sample below the trunk base / ground
+  // line (must be 0 after fix 4's grass clamp; low-REACHING branches are
+  // fine and wanted, crossing the ground is the bug).
+  // branchesBelowGrassMargin: dips into the 100px strip just above the base —
+  // informational, nonzero by design (poster has leaves near grass level);
+  // the trunk's own spine always counts once here.
+  let curlCount = 0, branchesBelowTrunkBase = 0, branchesBelowGrassMargin = 0;
+  branchNodes.forEach(node => {
+    let maxY = -Infinity, turn = 0, prevA = null;
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40;
+      const p = bezierPoint(node.p0, node.p1, node.p2, node.p3, t);
+      if (p.y > maxY) maxY = p.y;
+      const d = bezierDeriv(node.p0, node.p1, node.p2, node.p3, t);
+      const a = Math.atan2(d.y, d.x);
+      if (prevA !== null) {
+        let da = a - prevA;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        turn += Math.abs(da);
+      }
+      prevA = a;
+    }
+    if (turn > (150 * Math.PI) / 180) curlCount++;
+    if (maxY > trunkBaseY + 0.5) branchesBelowTrunkBase++;
+    if (maxY > trunkBaseY - 100) branchesBelowGrassMargin++;
+  });
+
+  // ---------- 6. Poster-grounded canopy position ----------
+  // Replaces the old flank-fill boxes (80–460px beside the trunk), which were
+  // unsatisfiable by construction: the innermost radial band sits at
+  // 0.74 × baseCanopyRadius, outside the boxes entirely. What the poster
+  // actually exhibits, measured from the reference PDF:
+  //   bare trunk ≈ 25–30% of total tree height before the first major limb;
+  //   lowest leaves hang within ~10–15% of the trunk base.
+  const treeTopY = Math.min(...leafCenters.map(l => l.y));
+  const treeHeight = Math.max(1, trunkBaseY - treeTopY);
+  const lowestLeafY = Math.max(...leafCenters.map(l => l.y));
+  const lowestAttachY = attachments && attachments.length
+    ? Math.max(...attachments.map(a => a.y))
+    : trunkBaseY;
+  const bareTrunkFraction = +((trunkBaseY - lowestAttachY) / treeHeight).toFixed(3);
+  const lowestLeafFrac = +((trunkBaseY - lowestLeafY) / treeHeight).toFixed(3);
+  // Robust companion to lowestLeafFrac: height of the 10th-percentile-lowest
+  // leaf. lowestLeafFrac can be satisfied by a couple of clamp-flattened
+  // outliers while the canopy mass still floats high — this is the number
+  // that tracks where foliage visually BEGINS (the actual complaint behind
+  // the old flank metric). No hard target yet; drives the trunk-shortening
+  // step after fix 4.
+  const sortedLeafYs = leafCenters.map(l => l.y).sort((a, b) => b - a);
+  const p10LeafY = sortedLeafYs[Math.floor(sortedLeafYs.length * 0.1)] ?? lowestLeafY;
+  const canopyLowerEdgeFrac = +((trunkBaseY - p10LeafY) / treeHeight).toFixed(3);
+
   return {
+    // Poster-grounded targets: bareTrunkFraction 0.25–0.30, lowestLeafFrac < 0.15
+    bareTrunkFraction,
+    lowestLeafFrac,
+    canopyLowerEdgeFrac,
+    curlCount,
+    branchesBelowTrunkBase,
+    branchesBelowGrassMargin,
     totalLeaves: leaves.length,
     twigCount: N,
     minTwigMemberSpacingPx,
+    // Count of twigs where the grass clamp flattened members to the same Y
+    // and the X-stretch correction had to fire to restore the 40px floor —
+    // each occurrence breaks the "members sit on their own twig's spine"
+    // invariant. Should stay a handful; if fix 3 pushes more leaves toward
+    // the flanks and this climbs, X-stretch is the wrong fix for that volume.
+    xStretchTriggerCount: xStretchTriggerCount || 0,
     leafPairCollisions,
     branchPairCollisions: collidingPairKeys.size,
     R_min,
     radiusUsed: baseCanopyRadius,
     canopyFillPct: insideCells ? +(100 * filledCells / insideCells).toFixed(1) : 0,
-    leftFlankFillPct: flankFill(trunkCenterX - 460, trunkCenterX - 80),
-    rightFlankFillPct: flankFill(trunkCenterX + 80, trunkCenterX + 460),
     leafBBox: {
       minX: Math.round(minX), maxX: Math.round(maxX),
       minY: Math.round(minY), maxY: Math.round(maxY)
