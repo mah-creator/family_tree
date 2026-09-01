@@ -13,6 +13,9 @@ import * as d3 from 'd3';
 const LEAF_MIN_CENTER_DIST = 38;
 const BRANCH_MIN_DIST = 12;
 const BRANCH_SAMPLES = 8;
+// Radius around a branch's own start point within which contact with another
+// branch counts as junction structure rather than a crossing.
+const JUNCTION_RADIUS = 90;
 const FILL_CELL = 60;
 
 function bezierPoint(p0, p1, p2, p3, t) {
@@ -80,6 +83,14 @@ export function computeLayoutMetrics(layoutResult) {
 
   const qt = d3.quadtree().x(d => d.x).y(d => d.y).addAll(samples);
   const collidingPairKeys = new Set();
+  // Split by whether the two branches belong to different depth-1 limbs.
+  // Cross-limb crossings are the ones the nested-ordering planarity rule is
+  // supposed to make impossible; within-limb ones are wedge containment's job.
+  const crossLimbKeys = new Set();
+  const depth1Of = n => {
+    const a = n.ancestors().find(x => x.depth === 1);
+    return a ? a.data.id : null;
+  };
 
   samples.forEach(s => {
     qt.visit((qn, x0, y0, x1, y1) => {
@@ -88,12 +99,22 @@ export function computeLayoutMetrics(layoutResult) {
         do {
           const o = q.data;
           if (o.node !== s.node && Math.hypot(o.x - s.x, o.y - s.y) < BRANCH_MIN_DIST) {
-            // Siblings near their shared junction are legitimate contact, not a crossing
-            const siblings = o.node.parent === s.node.parent;
-            const nearJunction = siblings && (o.t < 0.4 || s.t < 0.4);
+            // Contact in a branch's own junction neighbourhood is structural,
+            // not a crossing: branches are necessarily close to whatever they
+            // just emerged from. This generalises an earlier siblings-only
+            // rule, which missed the commonest case — a limb leaving the trunk
+            // runs alongside the trunk segment above it, and the two are not
+            // siblings (one's parent is the root, the other's is a trunk node).
+            // A genuine crossing happens out in the canopy, far from both
+            // branches' origins.
+            const nearJunction =
+              Math.hypot(s.x - s.node.p0.x, s.y - s.node.p0.y) < JUNCTION_RADIUS ||
+              Math.hypot(o.x - o.node.p0.x, o.y - o.node.p0.y) < JUNCTION_RADIUS;
             if (!isRelated(s.node, o.node) && !nearJunction) {
               const key = [s.node.data.id, o.node.data.id].sort().join('|');
               collidingPairKeys.add(key);
+              const la = depth1Of(s.node), lb = depth1Of(o.node);
+              if (la && lb && la !== lb) crossLimbKeys.add(key);
             }
           }
           q = q.next;
@@ -217,6 +238,9 @@ export function computeLayoutMetrics(layoutResult) {
     xStretchTriggerCount: xStretchTriggerCount || 0,
     leafPairCollisions,
     branchPairCollisions: collidingPairKeys.size,
+    crossLimbCrossings: crossLimbKeys.size,
+    withinLimbCrossings: collidingPairKeys.size - crossLimbKeys.size,
+    limbOrderingViolations: layoutResult.limbOrderingViolations ?? null,
     R_min,
     radiusUsed: baseCanopyRadius,
     canopyFillPct: insideCells ? +(100 * filledCells / insideCells).toFixed(1) : 0,

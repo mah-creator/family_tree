@@ -52,7 +52,8 @@ function renderTree(treeData) {
     height: 2800,
     trunkBaseY: 2500,
     trunkCenterX: 1800,
-    rootTrunkLength: 320,
+    rootTrunkLength: 300,
+    trunkChainStep: 300,
     rootBaseWidth: 52,
     singleLimbMode: isSingleLimbMode
   });

@@ -53,6 +53,16 @@ const TWIG_LEAF_HEIGHT_PX = 22;
 const MIN_LEAF_ADVANCE_PX = 70;
 // Fix 4: angular padding added to each side of a node's subtree wedge.
 const WEDGE_PAD = (4 * Math.PI) / 180;
+// Depth-1 limb attachment band, as a fraction of trunk length. The floor was
+// 0.35 through fixes 1–4, which left bareTrunkFraction at 0.097 against the
+// poster's 0.25–0.30: limbs started almost at the ground and the trunk read as
+// a stub. Raised to 0.55 (see also rootTrunkLength in main.js).
+// Tuned against bareTrunkFraction (poster target 0.25–0.30) with the trunk
+// COLUMN as the reference height, not the short root segment the 0.55 figure
+// was originally sized against. MAX stops short of 1.0 so no limb attaches
+// exactly at the column top, where the trunk's own subtree already emerges.
+const ATTACH_FRAC_MIN = 0.42;
+const ATTACH_FRAC_MAX = 0.94;
 
 /**
  * Fix 4: layout angles live in one contiguous 230° interval
@@ -200,6 +210,130 @@ function findDepth1Ancestor(node) {
 }
 
 /**
+ * Planarity by nested ordering — the rule that makes cross-limb crossings
+ * impossible.
+ *
+ * Fix 1 gave every depth-1 limb its own trunk attachment as its polar center,
+ * but arc allocation still handed out angles by global traversal index. Those
+ * two don't compose: two subtrees with adjacent angular ranges but origins at
+ * different heights overlap in world space, and no amount of per-node wedge
+ * tightening can prevent it (fix 4 measured 42 such crossings).
+ *
+ * The rule: split the sector at vertical; within each half, a LOWER attachment
+ * must get an angular range FURTHER from vertical. Low limbs go out wide, high
+ * limbs go up — which is both how a real tree is built and what the poster
+ * shows. Two limbs can only cross if their height ordering contradicts their
+ * angular ordering, and this forbids exactly that, so the arrangement is
+ * planar by construction rather than by tuning.
+ *
+ * This also inverts the old dependency: attachment height used to be derived
+ * from each limb's mean child angle (which came from traversal order). Here
+ * the ordering is chosen first — larger subtrees attach lower and sweep wider,
+ * matching the poster's long low limbs — and angles follow from it.
+ *
+ * Returns twigs reordered so each limb's block sits in its allotted sector
+ * position; angles are then assigned by index as before, keeping every
+ * subtree's range contiguous.
+ */
+function planLimbLayout(root, orderedTwigs) {
+  const depth1 = root.children || [];
+  const trunkLimbs = depth1.filter(n => n.data.isTrunkLineage);
+  const sideLimbs = depth1.filter(n => !n.data.isTrunkLineage);
+
+  const twigsByLimb = new Map();
+  orderedTwigs.forEach(t => {
+    const limb = findDepth1Ancestor(t.representative);
+    if (!twigsByLimb.has(limb)) twigsByLimb.set(limb, []);
+    twigsByLimb.get(limb).push(t);
+  });
+
+  const bySize = (a, b) =>
+    (b.subtreeSize || 1) - (a.subtreeSize || 1) || (a.data.id < b.data.id ? -1 : 1);
+
+  // Balance the two halves by leaf count so angular space is shared fairly
+  const right = [], left = [];
+  let rw = 0, lw = 0;
+  sideLimbs.slice().sort(bySize).forEach(limb => {
+    const w = limb.subtreeSize || 1;
+    if (rw <= lw) { right.push(limb); rw += w; } else { left.push(limb); lw += w; }
+  });
+
+  // Within a half, index 0 = lowest attachment = most lateral range, and that
+  // slot goes to the SMALLEST lineage. "Most lateral" in a 230° sector means
+  // horizontal-to-below-horizontal, which is where fix 2 widened the sector to
+  // let small lineages hang down beside the trunk. Putting the largest lineage
+  // there instead (tried first) splayed the two biggest subtrees dead
+  // horizontal like arms and left the crown empty; big lineages belong in the
+  // near-vertical range where the poster's canopy mass sits.
+  const bySizeAsc = (a, b) => -bySize(a, b);
+  right.sort(bySizeAsc);
+  left.sort(bySizeAsc);
+
+  // The two halves get staggered bands so no left limb attaches at exactly the
+  // same height as a right one. Sharing a height re-creates fix 1's original
+  // single-origin defect locally: limbs from both halves plus the trunk all
+  // radiated from one point at the column top and their subtrees tangled there
+  // (every remaining cross-limb crossing traced to that one spot). The stagger
+  // is a half-step, so it can never reorder limbs within a half and break the
+  // planarity rule.
+  const span = ATTACH_FRAC_MAX - ATTACH_FRAC_MIN;
+  const assignFracs = (arr, half, lowShift, highShift) => arr.forEach((limb, i) => {
+    const denom = Math.max(1, arr.length - 1);
+    const lo = ATTACH_FRAC_MIN + lowShift;
+    const hi = ATTACH_FRAC_MAX - highShift;
+    limb.plannedAttachFrac = arr.length === 1 ? hi : lo + (i / denom) * (hi - lo);
+    limb.plannedHalf = half;
+    limb.plannedRank = i;
+  });
+  const stagger = span / 6;
+  assignFracs(right, 'right', 0, stagger);
+  assignFracs(left, 'left', stagger, 0);
+  trunkLimbs.forEach(limb => {
+    limb.plannedAttachFrac = ATTACH_FRAC_MAX;
+    limb.plannedHalf = 'center';
+    limb.plannedRank = 0;
+  });
+
+  // Sector runs rightmost -> vertical -> leftmost. Right half most-lateral
+  // first; trunk occupies the vertical middle; left half runs back outward,
+  // so its nearest-vertical (highest) limb comes first.
+  const sequence = [...right, ...trunkLimbs, ...left.slice().reverse()];
+
+  const reordered = [];
+  sequence.forEach(limb => {
+    (twigsByLimb.get(limb) || []).forEach(t => reordered.push(t));
+  });
+  // Any twig whose limb somehow went unlisted keeps its original position
+  orderedTwigs.forEach(t => { if (!reordered.includes(t)) reordered.push(t); });
+
+  return { orderedTwigs: reordered, sequence, right, left, trunkLimbs };
+}
+
+/**
+ * Verifies the planarity rule actually held after allocation: within each
+ * half, a lower attachment must sit further from vertical. A nonzero count
+ * here means limbs can legitimately cross and the guarantee is void.
+ */
+function verifyLimbOrdering(plan, trunkBaseY) {
+  let violations = 0;
+  ['right', 'left'].forEach(half => {
+    const limbs = plan[half];
+    for (let i = 0; i < limbs.length; i++) {
+      for (let j = i + 1; j < limbs.length; j++) {
+        const a = limbs[i], b = limbs[j];
+        if (a.limbOrigin === undefined || b.limbOrigin === undefined) continue;
+        if (!a.limbOrigin || !b.limbOrigin) continue;
+        const aLower = a.limbOrigin.y > b.limbOrigin.y;
+        const aWider = Math.abs(a.targetAngle + Math.PI / 2) > Math.abs(b.targetAngle + Math.PI / 2);
+        if (a.limbOrigin.y === b.limbOrigin.y) continue;
+        if (aLower !== aWider) violations++;
+      }
+    }
+  });
+  return violations;
+}
+
+/**
  * Main Botanical Layout Engine — Leaf-Indexed Arc Allocation (Reingold-Tilford in Polar Form)
  */
 export function buildBotanicalLayout(treeData, options = {}) {
@@ -211,6 +345,12 @@ export function buildBotanicalLayout(treeData, options = {}) {
     rootTrunkLength = 340,
     rootBaseWidth = 54,
     sectorSpanDeg = 230,
+    // Spacing between successive gold trunk ovals. Kept independent of the
+    // canopy radius (dropping the flat 1150 radius floor in fix 3 shrank the
+    // derived step to 89 and overlapped the ry=36 ovals), and it is the lever
+    // that sets total trunk height: the poster's trunk is a tall column of
+    // stacked generations, not one long bare segment.
+    trunkChainStep = 280,
     singleLimbMode = false
   } = options;
 
@@ -243,7 +383,12 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
   // 2. Part A - Step 1: Collect Ordered Leaves & group them into twigs
   // (clusters of up to 3 sibling leaves sharing one branch — see collectOrderedTwigs)
-  const { leaves: orderedLeaves, twigs: orderedTwigs } = collectOrderedTwigs(root);
+  const { leaves: orderedLeaves, twigs: collectedTwigs } = collectOrderedTwigs(root);
+  // Planarity by nested ordering: reorder limb blocks so lower attachments own
+  // more-lateral angular ranges (see planLimbLayout). Twig order within a limb
+  // — and therefore every subtree's contiguity — is preserved.
+  const limbPlan = planLimbLayout(root, collectedTwigs);
+  const orderedTwigs = limbPlan.orderedTwigs;
   const N = orderedTwigs.length || 1;
 
   // 3. Part A - Step 3 & 4: Arc Allocation & R_min Calculation
@@ -392,8 +537,19 @@ export function buildBotanicalLayout(treeData, options = {}) {
     node.wedgeMax = node.wedgeRawMax + WEDGE_PAD;
   });
 
-  // Fix 1: depth-1 limbs attach along the trunk (35%–100% of its length), not at a single apex
-  const attachments = assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrunkLength });
+  // Trunk column height: base -> root oval -> the stacked trunk generations
+  // above it. Limbs attach along this whole column, not just the root
+  // segment, so the root ancestor's oval stays low (as the poster shows)
+  // while the column still supplies the tree's height.
+  const maxTrunkDepth = Math.max(0, ...root.descendants()
+    .filter(n => n.data.isTrunkLineage).map(n => n.depth));
+  const trunkColumnHeight = rootTrunkLength + maxTrunkDepth * trunkChainStep * 0.9;
+
+  // Fix 1: depth-1 limbs attach along the trunk column (ATTACH_FRAC_MIN..MAX
+  // of its height), not at a single apex
+  const attachments = assignLimbAttachments(root, {
+    trunkCenterX, trunkBaseY, trunkColumnHeight
+  });
 
   // Positions top-down so every node inherits its owning limb's origin
   root.eachBefore(node => {
@@ -421,7 +577,6 @@ export function buildBotanicalLayout(treeData, options = {}) {
     if (!node.limbOrigin) node.limbOrigin = node.parent.limbOrigin || null;
 
     if (isTrunk) {
-      node.limbOrigin = null;
       node.x3 = trunkCenterX;
       // Trunk-chain spacing is decoupled from the canopy radius: when the
       // flat 1150 radius floor was dropped (fix 3), depthRadiusStep shrank
@@ -429,16 +584,28 @@ export function buildBotanicalLayout(treeData, options = {}) {
       // overlapping, with their side limbs crowded into the same band. The
       // stack needs room for an oval plus clearance per generation,
       // regardless of how wide the canopy happens to be.
-      const trunkChainStep = Math.max(140, depthRadiusStep);
       node.y3 = trunkBaseY - rootTrunkLength - node.depth * trunkChainStep * 0.9;
+      // Fix 1's per-limb origin principle, extended up the trunk chain: a
+      // subtree hanging off a trunk node grows from THAT node, not from the
+      // tree base. Previously trunk nodes forced limbOrigin=null, so their
+      // side branches were laid out about a phantom center up to 700px below
+      // the actual junction — they swept down and across the low side limbs,
+      // and were by far the largest source of cross-limb crossings.
+      node.limbOrigin = {
+        x: trunkCenterX,
+        y: node.y3,
+        frac: 1, // already at full trunk height: no originLead compensation
+        entryTangent: -Math.PI / 2
+      };
       return;
     }
 
     const origin = node.limbOrigin;
     const cx = origin ? origin.x : trunkCenterX;
     const cy = origin ? origin.y : trunkBaseY;
-    // Trunk length not consumed by the attachment height — keeps overall reach comparable
-    const originLead = origin ? rootTrunkLength * (1 - origin.frac) : rootTrunkLength;
+    // Trunk height not consumed by the attachment height — keeps overall reach
+    // comparable between a low-attaching limb and a high-attaching one
+    const originLead = origin ? trunkColumnHeight * (1 - origin.frac) : trunkColumnHeight;
 
     if (!node.children || node.children.length === 0) {
       // Terminal leaf (twig representative): polar placement around the
@@ -594,6 +761,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // each twig's now-finished spine (must run after the geometry pass above)
   const xStretchTriggerCount = applyTwigMemberSampling(orderedTwigs, trunkBaseY - 100);
 
+  // Planarity assertion: lower attachment must sit further from vertical
+  // within each half. Nonzero means limbs may legitimately cross.
+  const limbOrderingViolations = verifyLimbOrdering(limbPlan, trunkBaseY);
+
   return {
     root,
     personMap,
@@ -606,6 +777,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
     baseCanopyRadius: Math.round(baseCanopyRadius),
     globalStep: Math.round(globalStep),
     xStretchTriggerCount,
+    limbOrderingViolations,
     attachments,
     radialBands,
     depthRadiusStep,
@@ -710,26 +882,21 @@ function applyTwigMemberSampling(twigs, grassClampY) {
  * Most lateral / downward-leaning limbs attach lowest; most vertical at the apex.
  * Deterministic: sort keyed on mean child angle with id tie-break, jitter seeded on id.
  */
-export function assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrunkLength }) {
+export function assignLimbAttachments(root, { trunkCenterX, trunkBaseY, trunkColumnHeight }) {
   const limbs = (root.children || []).filter(c => !c.data.isTrunkLineage);
   if (limbs.length === 0) return [];
 
-  const laterality = limb => {
-    const dev = Math.abs(normalizeSignedAngle(limb.targetAngle + Math.PI / 2));
-    const beyondHorizontal = Math.max(0, dev - Math.PI / 2);
-    return dev + 0.75 * beyondHorizontal; // downward lean weighted extra
-  };
-
-  // Most lateral first → attaches lowest
-  const sorted = limbs.slice().sort((a, b) =>
-    (laterality(b) - laterality(a)) || (a.data.id < b.data.id ? -1 : 1)
-  );
-
   const attachments = [];
-  sorted.forEach((limb, i) => {
-    let frac = sorted.length === 1 ? 1.0 : 0.35 + (i / (sorted.length - 1)) * 0.65;
-    frac += (seedHash(limb.data.id + '_attach') - 0.5) * 0.06;
-    frac = Math.max(0.35, Math.min(1.0, frac));
+  limbs.forEach(limb => {
+    // Height comes from planLimbLayout, which chose it BEFORE angles so that
+    // lower attachment implies a more lateral range (the planarity rule).
+    // Deriving it here from the limb's mean child angle — as this did through
+    // fix 4 — would reintroduce the circularity that rule exists to break.
+    const planned = limb.plannedAttachFrac !== undefined ? limb.plannedAttachFrac : ATTACH_FRAC_MAX;
+    // Jitter kept well inside the per-rank spacing so it can never reorder
+    // two limbs and violate the rule.
+    const jitter = (seedHash(limb.data.id + '_attach') - 0.5) * 0.03;
+    const frac = Math.max(ATTACH_FRAC_MIN, Math.min(ATTACH_FRAC_MAX, planned + jitter));
 
     // Leave the trunk partway between vertical and the limb's own heading
     const dev = normalizeSignedAngle(limb.targetAngle + Math.PI / 2);
@@ -737,7 +904,7 @@ export function assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrun
 
     limb.limbOrigin = {
       x: trunkCenterX,
-      y: trunkBaseY - frac * rootTrunkLength,
+      y: trunkBaseY - frac * trunkColumnHeight,
       frac,
       entryTangent
     };
@@ -746,6 +913,7 @@ export function assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrun
       id: limb.data.id,
       name: limb.data.name,
       frac: +frac.toFixed(3),
+      half: limb.plannedHalf,
       x: limb.limbOrigin.x,
       y: Math.round(limb.limbOrigin.y),
       meanAngleDeg: Math.round((limb.targetAngle * 180) / Math.PI),
