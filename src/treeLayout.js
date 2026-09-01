@@ -51,6 +51,22 @@ const TWIG_MIN_SPACING_PX = 40;
 const TWIG_LEAF_HEIGHT_PX = 22;
 // Minimum radial advance of a leaf past its own parent (fix 3).
 const MIN_LEAF_ADVANCE_PX = 70;
+// Fix 4: angular padding added to each side of a node's subtree wedge.
+const WEDGE_PAD = (4 * Math.PI) / 180;
+
+/**
+ * Fix 4: layout angles live in one contiguous 230° interval
+ * [leftmostAngle, rightmostAngle] with no wraparound, but atan2 output is
+ * [-π, π] — a left-flank below-horizontal point (layout angle ≈ -195°)
+ * comes back from atan2 as ≈ +165°. Map atan2 output into the sector's
+ * frame before comparing against wedge bounds.
+ */
+function toSectorFrame(a, rightmostAngle) {
+  const hi = rightmostAngle + 0.15;
+  while (a > hi) a -= 2 * Math.PI;
+  while (a <= hi - 2 * Math.PI) a += 2 * Math.PI;
+  return a;
+}
 
 function minConsecutiveDiff(arr) {
   let min = Infinity;
@@ -352,6 +368,30 @@ export function buildBotanicalLayout(treeData, options = {}) {
     node.targetAngle = sumAngle / node.children.length;
   });
 
+  // Fix 4: per-node wedge — the angular interval (about the polar center) the
+  // node's subtree leaves occupy, padded WEDGE_PAD each side. Contiguous
+  // leaf-index allocation makes sibling wedges disjoint (up to the pad), so
+  // containing every branch's control points in its own node's wedge makes
+  // crossings between unrelated subtrees structurally impossible — and kills
+  // the self-curl loops caused by p1 following a parent exit tangent pointing
+  // up to ~167° away from the branch's own chord.
+  root.eachAfter(node => {
+    if (!node.children || node.children.length === 0) {
+      node.wedgeRawMin = node.wedgeRawMax = node.targetAngle;
+    } else {
+      let mn = Infinity, mx = -Infinity;
+      node.children.forEach(c => {
+        if (c.wedgeRawMin === undefined) return;
+        mn = Math.min(mn, c.wedgeRawMin);
+        mx = Math.max(mx, c.wedgeRawMax);
+      });
+      node.wedgeRawMin = mn === Infinity ? node.targetAngle : mn;
+      node.wedgeRawMax = mx === -Infinity ? node.targetAngle : mx;
+    }
+    node.wedgeMin = node.wedgeRawMin - WEDGE_PAD;
+    node.wedgeMax = node.wedgeRawMax + WEDGE_PAD;
+  });
+
   // Fix 1: depth-1 limbs attach along the trunk (35%–100% of its length), not at a single apex
   const attachments = assignLimbAttachments(root, { trunkCenterX, trunkBaseY, rootTrunkLength });
 
@@ -383,7 +423,14 @@ export function buildBotanicalLayout(treeData, options = {}) {
     if (isTrunk) {
       node.limbOrigin = null;
       node.x3 = trunkCenterX;
-      node.y3 = trunkBaseY - rootTrunkLength - node.depth * depthRadiusStep * 0.9;
+      // Trunk-chain spacing is decoupled from the canopy radius: when the
+      // flat 1150 radius floor was dropped (fix 3), depthRadiusStep shrank
+      // 149→89 and the gold trunk ovals (ry=36) ended up 80px apart —
+      // overlapping, with their side limbs crowded into the same band. The
+      // stack needs room for an oval plus clearance per generation,
+      // regardless of how wide the canopy happens to be.
+      const trunkChainStep = Math.max(140, depthRadiusStep);
+      node.y3 = trunkBaseY - rootTrunkLength - node.depth * trunkChainStep * 0.9;
       return;
     }
 
@@ -462,11 +509,19 @@ export function buildBotanicalLayout(treeData, options = {}) {
     }
 
     if (sweepingLimbs.has(node.data.id) && node.depth === 1) {
-      // Part B - Step 9: Long sweeping limb crossing trunk axis
+      // Part B - Step 9: Long sweeping limb crossing trunk axis.
+      // Fix 4: the sweep travels along the limb's own wedge, never across it —
+      // the raw ±0.25 rad offset could point the junction outside the angular
+      // interval the limb's own subtree occupies.
       const sweepSide = (seedHash(node.data.id + '_side') > 0.5) ? 1 : -1;
       const sweepDist = 480 + (seedHash(node.data.id + '_sweep') - 0.5) * 100;
-      node.x3 = cx + Math.cos(node.targetAngle + sweepSide * 0.25) * sweepDist;
+      const rawSweepAngle = node.targetAngle + sweepSide * 0.25;
+      const sweepAngle = Math.min(node.wedgeMax - WEDGE_PAD / 2,
+        Math.max(node.wedgeMin + WEDGE_PAD / 2, rawSweepAngle));
+      node.x3 = cx + Math.cos(sweepAngle) * sweepDist;
       node.y3 = cy - 120 + Math.sin(node.targetAngle) * sweepDist * 0.7;
+      // Fix 4: nothing below the ground line (reaching it is fine)
+      if (node.y3 > trunkBaseY) node.y3 = trunkBaseY;
       return;
     }
 
@@ -480,6 +535,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
     const r = originLead + internalRelativeDepth * internalStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
     node.x3 = cx + Math.cos(node.targetAngle) * r * 1.05;
     node.y3 = cy + Math.sin(node.targetAngle) * r * 0.85;
+    // Fix 4: internal junctions were never ground-clamped (only leaves were) —
+    // a past-horizontal angle from the widened sector could sink one below
+    // the trunk base. Reaching the ground line is allowed; crossing it isn't.
+    if (node.y3 > trunkBaseY) node.y3 = trunkBaseY;
   });
 
   // 6. Compute S-Curved Branch Geometry (Part B - Step 8) from root down to leaves
@@ -521,8 +580,14 @@ export function buildBotanicalLayout(treeData, options = {}) {
       node.baseWidth * Math.sqrt(childSize / parentSize)
     );
 
-    // Compute S-curve Bézier control points
-    computeSCurveSpineGeometry(node, startTangent);
+    // Compute S-curve Bézier control points, wedge- and ground-clamped (Fix 4).
+    // Clamp center = the same polar center the node's placement used.
+    computeSCurveSpineGeometry(node, startTangent, {
+      cx: node.limbOrigin ? node.limbOrigin.x : trunkCenterX,
+      cy: node.limbOrigin ? node.limbOrigin.y : trunkBaseY,
+      grassY: trunkBaseY,
+      rightmostAngle
+    });
   });
 
   // 7. Cluster fix: position non-representative twig members by sampling
@@ -720,7 +785,7 @@ function computeTrunkSpineGeometry(rootNode) {
  * Compound Bézier where P1 extends along parent exit tangent (~40%)
  * and P2 approaches destination from child heading, with opposite perpendicular offsets.
  */
-function computeSCurveSpineGeometry(node, parentExitTangent) {
+function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx) {
   const x0 = node.x0;
   const y0 = node.y0;
   const x3 = node.x3;
@@ -730,14 +795,25 @@ function computeSCurveSpineGeometry(node, parentExitTangent) {
   const dy = y3 - y0;
   const L = Math.hypot(dx, dy) || 1;
 
-  // Tangent at start (along parent exit tangent)
-  const t0x = Math.cos(parentExitTangent);
-  const t0y = Math.sin(parentExitTangent);
-  const n0x = -t0y;
-  const n0y = t0x;
-
   // Tangent at end (approaching target)
   const childHeading = Math.atan2(dy, dx);
+
+  // Fix 4: the start tangent follows the parent's exit tangent only within a
+  // ±50° cone around the branch's own chord. Unconstrained, a parent exiting
+  // up to ~167° away from where this branch actually travels threw p1
+  // backwards and looped the branch around itself (the observed self-curls).
+  // Clamping the DIRECTION here, rather than repositioning p1 afterwards,
+  // keeps the junction smooth instead of introducing a kink.
+  const TANGENT_CONE = (50 * Math.PI) / 180;
+  const tangentDev = normalizeSignedAngle(parentExitTangent - childHeading);
+  const effectiveTangent = childHeading +
+    Math.max(-TANGENT_CONE, Math.min(TANGENT_CONE, tangentDev));
+
+  // Tangent at start (cone-clamped parent exit tangent)
+  const t0x = Math.cos(effectiveTangent);
+  const t0y = Math.sin(effectiveTangent);
+  const n0x = -t0y;
+  const n0y = t0x;
   const t3x = Math.cos(childHeading);
   const t3y = Math.sin(childHeading);
   const n3x = -t3y;
@@ -759,9 +835,48 @@ function computeSCurveSpineGeometry(node, parentExitTangent) {
     p2y += droop * 0.5;
   }
 
-  // Upward growth clamp
-  if (p1y > y0) p1y = y0;
-  if (p2y > y0) p2y = y0;
+  // Fix 4: clamp p2 into the node's own subtree wedge, measured about the
+  // node's polar center with the same 1.05/0.85 elliptical squash placement
+  // uses. p2 sits near p3 (inside the wedge by construction), so this fires
+  // rarely and is a pure separation win. p1 is deliberately NOT wedge-clamped:
+  // it lives near the shared junction p0, whose angle is often outside this
+  // node's own wedge, and repositioning it introduced start kinks (curl count
+  // went UP when tried) — the tangent cone above handles p1's direction
+  // instead.
+  // Trunk-lineage segments are exempt: their spine runs the vertical axis,
+  // but their subtree's leaves (and hence wedge) sit far to one side — the
+  // clamp yanked the trunk's own p2 hundreds of px sideways when applied.
+  if (clampCtx && node.wedgeMin !== undefined && !node.data.isTrunkLineage) {
+    const ux = (p2x - clampCtx.cx) / 1.05;
+    const uy = (p2y - clampCtx.cy) / 0.85;
+    let a = toSectorFrame(Math.atan2(uy, ux), clampCtx.rightmostAngle);
+    const r = Math.hypot(ux, uy);
+    if (a < node.wedgeMin || a > node.wedgeMax) {
+      a = a < node.wedgeMin ? node.wedgeMin : node.wedgeMax;
+      p2x = clampCtx.cx + Math.cos(a) * r * 1.05;
+      p2y = clampCtx.cy + Math.sin(a) * r * 0.85;
+    }
+  }
+
+  // Fix 4: sag + ground clamps. A control point may sag only modestly below
+  // the LOWER of the branch's own endpoints — unbounded, past-horizontal
+  // branches plunged their curves far below both endpoints, and flattening
+  // those plunges exactly onto the ground line piled dozens of co-linear
+  // segments within collision distance of each other (+24 branch-pair
+  // collisions when tried). Bounding sag relative to the branch's own
+  // endpoints stops the plunge before the line is ever involved; the ground
+  // line itself stays an exact clamp with no margin above it, so low
+  // branches still REACH the grass — they just don't run along under it.
+  if (clampCtx) {
+    const maxCtrlY = Math.min(clampCtx.grassY, Math.max(y0, y3) + 40);
+    if (p1y > maxCtrlY) p1y = maxCtrlY;
+    if (p2y > maxCtrlY) p2y = maxCtrlY;
+  }
+  // (The old unconditional "upward growth clamp" — p_y ≤ y0 — is gone: it
+  // predates fix 2, and for the now-legal down-heading branches (endpoint
+  // below start) it flattened control points into a horizontal run with a
+  // hook at the end, which is exactly the residual curl signature. The sag
+  // clamp above bounds control-point y against BOTH endpoints instead.)
 
   node.p0 = { x: x0, y: y0 };
   node.p1 = { x: p1x, y: p1y };
