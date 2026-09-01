@@ -11,6 +11,12 @@ import { initGrowthAnimation } from './growthAnimation.js';
 import { generateSyntheticTree } from './syntheticData.js';
 import { computeLayoutMetrics } from './layoutMetrics.js';
 
+// World-space canvas. Single source of truth: the layout, the camera bounds
+// and the initial framing all derive from these.
+const CANVAS_W = 4600;
+const CANVAS_H = 3600;
+const TRUNK_BASE_Y = 3250;
+
 let activeTreeData = rawTreeData;
 let layoutResult = null;
 let quadtreeCuller = null;
@@ -47,14 +53,17 @@ function renderTree(treeData) {
   nodesLayer.innerHTML = '';
 
   // 1. Botanical Layout
+  // Canvas grew with the 1.45x leaf scale: the larger leaves push R_min to
+  // 539 and the canopy radius to ~908, which overflowed the old 3600x2800
+  // world and left the tree jammed against the frame.
   layoutResult = buildBotanicalLayout(treeData, {
-    width: 3600,
-    height: 2800,
-    trunkBaseY: 2500,
-    trunkCenterX: 1800,
-    rootTrunkLength: 300,
-    trunkChainStep: 300,
-    rootBaseWidth: 52,
+    width: CANVAS_W,
+    height: CANVAS_H,
+    trunkBaseY: TRUNK_BASE_Y,
+    trunkCenterX: CANVAS_W / 2,
+    rootTrunkLength: 460,
+    trunkChainStep: 480,
+    rootBaseWidth: 56,
     singleLimbMode: isSingleLimbMode
   });
 
@@ -180,8 +189,8 @@ function renderTree(treeData) {
 
   // 5. Camera Setup
   cameraObj = initCamera(svg, zoomContainer, {
-    width: 3600,
-    height: 2800,
+    width: CANVAS_W,
+    height: CANVAS_H,
     onZoom: (transform) => {
       const status = quadtreeCuller.updateViewport(transform, window.innerWidth, window.innerHeight);
       updateProfilerUI(status, descendants.length);
@@ -204,14 +213,28 @@ function renderTree(treeData) {
   // 8. Layout Self-Metrics (headless-reproducible; read via window.__treeMetrics or console)
   const metrics = computeLayoutMetrics(layoutResult);
   window.__treeMetrics = metrics;
+  window.__layout = layoutResult;
+  window.__culler = quadtreeCuller;
   console.log('[TREE METRICS]', JSON.stringify(metrics, null, 2));
 
   // Dev hook: position camera at world point (cx, cy) at scale k (verification tooling)
+  // Measures the SVG's own rect rather than window.innerWidth: in an embedded
+  // preview pane the two disagree, which silently mis-centres the view.
+  // Omit k to fit the whole tree.
   window.__setView = (cx, cy, k) => {
+    const r = svg.getBoundingClientRect();
+    const b = layoutResult.leafBBox || null;
+    if (k === undefined) {
+      const m = computeLayoutMetrics(layoutResult).leafBBox;
+      cx = (m.minX + m.maxX) / 2;
+      cy = (m.minY + m.maxY) / 2;
+      k = Math.min(r.width / (m.maxX - m.minX), r.height / (m.maxY - m.minY)) * 0.92;
+    }
     const t = d3.zoomIdentity
-      .translate(window.innerWidth / 2 - cx * k, window.innerHeight / 2 - cy * k)
+      .translate(r.width / 2 - cx * k, r.height / 2 - cy * k)
       .scale(k);
     cameraObj.svg.call(cameraObj.zoom.transform, t);
+    return { cx, cy, k: +k.toFixed(3), viewport: [Math.round(r.width), Math.round(r.height)] };
   };
 
   // 9. Debug Overlay (attachment points, canopy bands, sector rays, grass line)

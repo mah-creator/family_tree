@@ -1,4 +1,5 @@
 import * as d3 from 'd3';
+import { LEAF_MIN_CENTER_DIST, LEAF_CENTER_OFFSET } from './leafGeometry.js';
 
 /**
  * Layout self-metrics — computed from the layout model (not the DOM) so numbers
@@ -10,7 +11,6 @@ import * as d3 from 'd3';
  * is closer than 12px and neither node is an ancestor of the other.
  */
 
-const LEAF_MIN_CENTER_DIST = 38;
 const BRANCH_MIN_DIST = 12;
 const BRANCH_SAMPLES = 8;
 // Radius around a branch's own start point within which contact with another
@@ -45,8 +45,8 @@ export function computeLayoutMetrics(layoutResult) {
     const a = n.exitTangent || 0;
     return {
       node: n,
-      x: n.x3 + 23 * Math.cos(a),
-      y: n.y3 + 23 * Math.sin(a)
+      x: n.x3 + LEAF_CENTER_OFFSET * Math.cos(a),
+      y: n.y3 + LEAF_CENTER_OFFSET * Math.sin(a)
     };
   });
 

@@ -15,13 +15,13 @@ const treeData = JSON.parse(
 
 // MUST mirror renderTree() options in src/main.js
 const layout = buildBotanicalLayout(treeData, {
-  width: 3600,
-  height: 2800,
-  trunkBaseY: 2500,
-  trunkCenterX: 1800,
-  rootTrunkLength: 300,
-  trunkChainStep: 300,
-  rootBaseWidth: 52
+  width: 4600,
+  height: 3600,
+  trunkBaseY: 3250,
+  trunkCenterX: 2300,
+  rootTrunkLength: 460,
+  trunkChainStep: 480,
+  rootBaseWidth: 56
 });
 
 const metrics = computeLayoutMetrics(layout);

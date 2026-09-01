@@ -1,4 +1,7 @@
 import * as d3 from 'd3';
+import {
+  LEAF_HEIGHT, TWIG_MIN_SPACING_PX, TWIG_ANGULAR_CLEARANCE
+} from './leafGeometry.js';
 
 /**
  * Seeded PRNG helper for deterministic organic irregularity.
@@ -47,8 +50,7 @@ export function computeSubtreeSizes(root) {
 // along the twig's own finished Bézier spine (see collectOrderedTwigs and
 // applyTwigMemberSampling).
 const TWIG_T_BY_COUNT = { 1: [1.0], 2: [0.7, 1.0], 3: [0.45, 0.72, 1.0] };
-const TWIG_MIN_SPACING_PX = 40;
-const TWIG_LEAF_HEIGHT_PX = 22;
+const TWIG_LEAF_HEIGHT_PX = LEAF_HEIGHT;
 // Minimum radial advance of a leaf past its own parent (fix 3).
 const MIN_LEAF_ADVANCE_PX = 70;
 // Fix 4: angular padding added to each side of a node's subtree wedge.
@@ -399,12 +401,13 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const rightmostAngle = -Math.PI / 2 + sectorWidthRad / 2; // Right side start (~25 deg, past horizontal)
   const leftmostAngle = -Math.PI / 2 - sectorWidthRad / 2;  // Left side end (~-205 deg, past horizontal)
 
-  // R_min = 52 * N / (3 * sectorWidth * 0.74). N is now twig count, not leaf
-  // count — a twig with alternating clustered members is wider than one leaf
-  // (leaf height 23px + up to ~2x the nudge), so the clearance term is 52,
-  // not 34, or angular slots would be spaced for a single leaf and quietly
-  // collide once clusters exist.
-  const R_min = (52 * N) / (3 * sectorWidthRad * 0.74);
+  // R_min = clearance * N / (3 * sectorWidth * 0.74). N is twig count, not
+  // leaf count — a twig with alternating clustered members is wider than one
+  // leaf (leaf height plus ~2x the nudge), so the clearance term is not just
+  // leaf height, or angular slots would be spaced for a single leaf and
+  // quietly collide. Both terms live in leafGeometry.js and scale with the
+  // leaf, so enlarging leaves widens the required radius automatically.
+  const R_min = (TWIG_ANGULAR_CLEARANCE * N) / (3 * sectorWidthRad * 0.74);
   // Fix 3: dropped the flat 1150 floor — a single global minimum stopped
   // making sense once radial reach became per-lineage (below); baseCanopyRadius
   // is now purely R_min-derived (the angular-slot tangential-spacing guarantee

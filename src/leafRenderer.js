@@ -4,15 +4,19 @@
  * and text flipping to prevent upside-down Arabic typography.
  */
 
+import {
+  LEAF_WIDTH, LEAF_HEIGHT, LEAF_CENTER_OFFSET, LEAF_FONT_SCALE
+} from './leafGeometry.js';
+
 // Leaf path generator (curved botanical leaf shape pointing right at 0 deg)
-export function getLeafSVGPath(width = 46, height = 23) {
+export function getLeafSVGPath(width = LEAF_WIDTH, height = LEAF_HEIGHT) {
   const w = width;
   const h = height / 2;
   return `M 0 0 C ${w * 0.25} ${-h * 1.3}, ${w * 0.75} ${-h * 1.1}, ${w} 0 C ${w * 0.75} ${h * 1.1}, ${w * 0.25} ${h * 1.3}, 0 0 Z`;
 }
 
 // Leaf central vein path
-export function getLeafVeinPath(width = 46) {
+export function getLeafVeinPath(width = LEAF_WIDTH) {
   return `M 2 0 Q ${width * 0.5} -1, ${width * 0.88} 0`;
 }
 
@@ -21,17 +25,22 @@ export function getLeafVeinPath(width = 46) {
  * Floor: 8px, Baseline: 12px
  */
 export function calculateFontSize(name) {
-  if (!name) return { fontSize: 12, truncatedName: '' };
+  if (!name) return { fontSize: 12 * LEAF_FONT_SCALE, truncatedName: '' };
 
   const len = name.length;
-  let fontSize = 12;
+  // Font ramp scales with the leaf so text keeps its proportion inside the
+  // shape — and gets more readable as a side effect of the larger leaf.
+  let fontSize = 12 * LEAF_FONT_SCALE;
 
-  if (len > 12) fontSize = 8.5;
-  else if (len > 9) fontSize = 9.5;
-  else if (len > 6) fontSize = 11;
+  if (len > 12) fontSize = 8.5 * LEAF_FONT_SCALE;
+  else if (len > 9) fontSize = 9.5 * LEAF_FONT_SCALE;
+  else if (len > 6) fontSize = 11 * LEAF_FONT_SCALE;
 
+  // Truncate only in the smallest font tier. Keyed on length, not on the
+  // font size: the old `fontSize <= 8.5` test silently stopped matching once
+  // the ramp was scaled, so long names would have overflowed their leaf.
   let truncatedName = name;
-  if (len > 15 && fontSize <= 8.5) {
+  if (len > 15) {
     truncatedName = name.substring(0, 13) + '…';
   }
 
@@ -63,7 +72,7 @@ export function createLeafNode(node, x, y, angleDeg = 0, showText = true) {
 
   // Leaf SVG shape
   const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute('d', getLeafSVGPath(46, 23));
+  path.setAttribute('d', getLeafSVGPath(LEAF_WIDTH, LEAF_HEIGHT));
   path.setAttribute('class', 'leaf-shape');
   path.setAttribute('fill', isDistinguished ? 'url(#goldLeafGradient)' : 'url(#emeraldLeafGradient)');
   path.setAttribute('stroke', isDistinguished ? '#9A7B2C' : '#1D5A38');
@@ -71,7 +80,7 @@ export function createLeafNode(node, x, y, angleDeg = 0, showText = true) {
 
   // Leaf vein
   const vein = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  vein.setAttribute('d', getLeafVeinPath(46));
+  vein.setAttribute('d', getLeafVeinPath(LEAF_WIDTH));
   vein.setAttribute('class', 'leaf-vein');
   vein.setAttribute('stroke', isDistinguished ? 'rgba(255, 235, 175, 0.6)' : 'rgba(180, 240, 200, 0.45)');
   vein.setAttribute('stroke-width', '0.8');
@@ -89,7 +98,9 @@ export function createLeafNode(node, x, y, angleDeg = 0, showText = true) {
 
     // Flip text 180 deg if leaf points into left half (-180 to -90 or 90 to 180) to keep Arabic upright
     const isUpsideDown = Math.abs(normalizedAngle) > 90;
-    const textTransform = isUpsideDown ? 'translate(23, 0) rotate(180)' : 'translate(23, 0) rotate(0)';
+    const textTransform = isUpsideDown
+      ? `translate(${LEAF_CENTER_OFFSET}, 0) rotate(180)`
+      : `translate(${LEAF_CENTER_OFFSET}, 0) rotate(0)`;
 
     const textGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     textGroup.setAttribute('transform', textTransform);

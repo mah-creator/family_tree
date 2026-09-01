@@ -9,7 +9,7 @@ export function initCamera(svgElement, zoomContainerGroup, options = {}) {
   const {
     width = 3400,
     height = 2600,
-    minScale = 0.25,
+    minScale = 0.12,
     maxScale = 20,
     onZoom = null
   } = options;
@@ -26,14 +26,22 @@ export function initCamera(svgElement, zoomContainerGroup, options = {}) {
 
   svg.call(zoom);
 
-  // Initial center framing for 3400x2600 canvas
+  // Initial framing: fit the whole world into the viewport. Both the scale
+  // (0.42) and the focus point (1700, 1450) used to be hardcoded for a
+  // 3400x2600 canvas, so enlarging the world for the 1.45x leaves left the
+  // tree off-centre and overscaled. Derived from width/height now.
   const viewportWidth = window.innerWidth || 1280;
   const viewportHeight = window.innerHeight || 900;
-  const initialScale = 0.42;
+  const initialScale = Math.max(
+    minScale,
+    Math.min(viewportWidth / width, viewportHeight / height) * 0.92
+  );
 
-  // Center tree world coordinates (1700, 1500)
   const initialTransform = d3.zoomIdentity
-    .translate(viewportWidth / 2 - 1700 * initialScale, viewportHeight / 2 - 1450 * initialScale)
+    .translate(
+      viewportWidth / 2 - (width / 2) * initialScale,
+      viewportHeight / 2 - (height / 2) * initialScale
+    )
     .scale(initialScale);
 
   svg.call(zoom.transform, initialTransform);
