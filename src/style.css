@@ -226,7 +226,10 @@ html, body {
   fill: url(#goldTrunkGradient);
   stroke: #8C6A27;
   stroke-width: 2.5px;
-  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.25));
+  /* SVG drop-shadow filters were roughly half the paint cost at 1,000 nodes
+     (~2000ms vs ~3600ms per pan frame) for very little visually. Replaced
+     with a flat darker stroke, which costs nothing to rasterise. */
+  stroke-width: 3px;
 }
 
 .trunk-text-name {
@@ -246,7 +249,8 @@ html, body {
   fill: url(#goldFounderGradient);
   stroke: #A32A2A;
   stroke-width: 2px;
-  filter: drop-shadow(0 3px 6px rgba(163, 42, 42, 0.35));
+  /* see .trunk-oval — filter dropped for paint cost */
+  stroke-width: 2.5px;
 }
 
 .founder-text {

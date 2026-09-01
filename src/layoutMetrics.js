@@ -208,6 +208,52 @@ export function computeLayoutMetrics(layoutResult) {
     if (maxY > trunkBaseY - 100) branchesBelowGrassMargin++;
   });
 
+  // ---------- 4b. True branch intersections ----------
+  // branchPairCollisions measures PROXIMITY (<12px), which conflates two very
+  // different things: branches that actually cross, and siblings running
+  // near-parallel just past a shared junction. The latter is unavoidable at
+  // density — every child leaves along its parent's exit tangent, so siblings
+  // share a heading for the first ~40% of their length — and it is what makes
+  // that count explode from 10 to 343 between the 117- and 521-leaf sets.
+  // This counts real segment intersections instead, which is unambiguous:
+  // two branches either cross or they do not.
+  const polylines = branchNodes.map(node => {
+    const pts = [];
+    for (let i = 0; i <= 12; i++) {
+      pts.push(bezierPoint(node.p0, node.p1, node.p2, node.p3, i / 12));
+    }
+    return { node, pts };
+  });
+  const segsIntersect = (a, b, c, d) => {
+    const s1 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    const s2 = (b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x);
+    const s3 = (d.x - c.x) * (a.y - c.y) - (d.y - c.y) * (a.x - c.x);
+    const s4 = (d.x - c.x) * (b.y - c.y) - (d.y - c.y) * (b.x - c.x);
+    return (s1 > 0) !== (s2 > 0) && (s3 > 0) !== (s4 > 0);
+  };
+  let branchIntersections = 0;
+  let crossLimbIntersections = 0;
+  for (let i = 0; i < polylines.length; i++) {
+    for (let j = i + 1; j < polylines.length; j++) {
+      const A = polylines[i], B = polylines[j];
+      if (isRelated(A.node, B.node)) continue;
+      // Siblings share p0 exactly; their first segments meet there by
+      // construction, which is a junction, not a crossing.
+      const sib = A.node.parent === B.node.parent;
+      let hit = false;
+      for (let m = sib ? 1 : 0; m < A.pts.length - 1 && !hit; m++) {
+        for (let n = sib ? 1 : 0; n < B.pts.length - 1; n++) {
+          if (segsIntersect(A.pts[m], A.pts[m + 1], B.pts[n], B.pts[n + 1])) { hit = true; break; }
+        }
+      }
+      if (hit) {
+        branchIntersections++;
+        const la = depth1Of(A.node), lb = depth1Of(B.node);
+        if (la && lb && la !== lb) crossLimbIntersections++;
+      }
+    }
+  }
+
   // ---------- 5b. Junction turning ----------
   // Angle between a parent's exit tangent and the child's own chord. A child
   // whose allocated angle sits far from where its parent arrives heads back
@@ -304,6 +350,10 @@ export function computeLayoutMetrics(layoutResult) {
     // the flanks and this climbs, X-stretch is the wrong fix for that volume.
     xStretchTriggerCount: xStretchTriggerCount || 0,
     leafPairCollisions,
+    // True crossings — the number that matters. branchPairCollisions below is
+    // the older proximity measure, kept for continuity.
+    branchIntersections,
+    crossLimbIntersections,
     branchPairCollisions: collidingPairKeys.size,
     crossLimbCrossings: crossLimbKeys.size,
     withinLimbCrossings: collidingPairKeys.size - crossLimbKeys.size,

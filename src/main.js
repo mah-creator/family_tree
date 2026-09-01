@@ -10,12 +10,60 @@ import { normalizeArabic, buildLineageChain } from './arabicNormalizer.js';
 import { initGrowthAnimation } from './growthAnimation.js';
 import { generateSyntheticTree } from './syntheticData.js';
 import { computeLayoutMetrics } from './layoutMetrics.js';
+import { LEAF_WIDTH } from './leafGeometry.js';
 
-// World-space canvas. Single source of truth: the layout, the camera bounds
-// and the initial framing all derive from these.
-const CANVAS_W = 4600;
-const CANVAS_H = 3600;
-const TRUNK_BASE_Y = 3250;
+// Provisional world size, used only for the first of two layout passes. The
+// real canvas is derived from the measured layout bounds (see layoutToFit) —
+// hardcoding it broke twice for the same reason: once when the leaf scale
+// changed, and again at 1,000 nodes, where R_min grows with leaf count and
+// the canopy came out 11,116 x 7,329 against a fixed 4,600 x 3,600 world.
+const PROVISIONAL_W = 4600;
+const PROVISIONAL_H = 3600;
+const CANVAS_MARGIN = 260;
+
+/**
+ * Runs the layout twice: once to discover how big the tree actually wants to
+ * be, then again on a world sized to fit it with a uniform margin. The layout
+ * is deterministic and seeded, so the second pass reproduces the first exactly
+ * apart from the translation.
+ */
+function layoutToFit(treeData, opts) {
+  const probe = buildBotanicalLayout(treeData, {
+    ...opts,
+    width: PROVISIONAL_W,
+    height: PROVISIONAL_H,
+    trunkBaseY: PROVISIONAL_H - 350,
+    trunkCenterX: PROVISIONAL_W / 2
+  });
+
+  // Bounds over everything drawn: branch spines (with their control points,
+  // which can bow outside the endpoints) and leaf bodies.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const grow = (x, y, pad) => {
+    if (!isFinite(x) || !isFinite(y)) return;
+    minX = Math.min(minX, x - pad); maxX = Math.max(maxX, x + pad);
+    minY = Math.min(minY, y - pad); maxY = Math.max(maxY, y + pad);
+  };
+  probe.root.descendants().forEach(n => {
+    [n.p0, n.p1, n.p2, n.p3].forEach(p => p && grow(p.x, p.y, 0));
+    grow(n.x3, n.y3, LEAF_WIDTH);
+  });
+  // The trunk base and grass line must stay in frame even if no leaf reaches
+  // them, since the root oval sits there.
+  grow(probe.layoutOpts.trunkCenterX, probe.layoutOpts.trunkBaseY, 80);
+
+  const treeW = maxX - minX;
+  const treeH = maxY - minY;
+  const width = Math.ceil(treeW + CANVAS_MARGIN * 2);
+  const height = Math.ceil(treeH + CANVAS_MARGIN * 2);
+  // Place the trunk so the measured bounds land inside the new world.
+  const trunkCenterX = CANVAS_MARGIN + (probe.layoutOpts.trunkCenterX - minX);
+  const trunkBaseY = CANVAS_MARGIN + (probe.layoutOpts.trunkBaseY - minY);
+
+  return buildBotanicalLayout(treeData, {
+    ...opts, width, height, trunkBaseY, trunkCenterX
+  });
+}
 
 let activeTreeData = rawTreeData;
 let layoutResult = null;
@@ -56,11 +104,7 @@ function renderTree(treeData) {
   // Canvas grew with the 1.45x leaf scale: the larger leaves push R_min to
   // 539 and the canopy radius to ~908, which overflowed the old 3600x2800
   // world and left the tree jammed against the frame.
-  layoutResult = buildBotanicalLayout(treeData, {
-    width: CANVAS_W,
-    height: CANVAS_H,
-    trunkBaseY: TRUNK_BASE_Y,
-    trunkCenterX: CANVAS_W / 2,
+  layoutResult = layoutToFit(treeData, {
     rootTrunkLength: 460,
     trunkChainStep: 480,
     rootBaseWidth: 56,
@@ -189,8 +233,8 @@ function renderTree(treeData) {
 
   // 5. Camera Setup
   cameraObj = initCamera(svg, zoomContainer, {
-    width: CANVAS_W,
-    height: CANVAS_H,
+    width: layoutResult.layoutOpts.width,
+    height: layoutResult.layoutOpts.height,
     onZoom: (transform) => {
       const status = quadtreeCuller.updateViewport(transform, window.innerWidth, window.innerHeight);
       updateProfilerUI(status, descendants.length);

@@ -607,12 +607,20 @@ export function buildBotanicalLayout(treeData, options = {}) {
   constrainJunctionTurning(root);
 
   // Fix 4: per-node wedge — the angular interval (about the polar center) the
-  // node's subtree leaves occupy, padded WEDGE_PAD each side. Contiguous
-  // leaf-index allocation makes sibling wedges disjoint (up to the pad), so
-  // containing every branch's control points in its own node's wedge makes
-  // crossings between unrelated subtrees structurally impossible — and kills
-  // the self-curl loops caused by p1 following a parent exit tangent pointing
-  // up to ~167° away from the branch's own chord.
+  // node's subtree leaves occupy, padded each side. Contiguous leaf-index
+  // allocation makes sibling wedges disjoint (up to the pad), so containing
+  // every branch's control points in its own wedge is what keeps subtrees out
+  // of each other.
+  //
+  // The pad is RELATIVE, not a fixed 4°. A fixed pad is a fraction of a twig
+  // slot at 64 twigs (slot 3.6°) but spans five slots at 319 (slot 0.72°), so
+  // every wedge overlapped its neighbours and containment silently stopped
+  // containing — which is where the 343 within-limb crossings at 1,000 nodes
+  // came from. Capping it at a quarter of the wedge's own width makes it scale
+  // with density. Leaf wedges are a single angle (zero width), so they fall
+  // back to a quarter of one twig slot rather than to zero — a zero pad would
+  // clamp p2 exactly onto the leaf's own ray and flatten out the twig flex.
+  const twigSlotWidth = sectorWidthRad / N;
   root.eachAfter(node => {
     if (!node.children || node.children.length === 0) {
       node.wedgeRawMin = node.wedgeRawMax = node.targetAngle;
@@ -626,8 +634,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
       node.wedgeRawMin = mn === Infinity ? node.targetAngle : mn;
       node.wedgeRawMax = mx === -Infinity ? node.targetAngle : mx;
     }
-    node.wedgeMin = node.wedgeRawMin - WEDGE_PAD;
-    node.wedgeMax = node.wedgeRawMax + WEDGE_PAD;
+    const effectiveWidth = Math.max(node.wedgeRawMax - node.wedgeRawMin, twigSlotWidth);
+    const pad = Math.min(WEDGE_PAD, 0.25 * effectiveWidth);
+    node.wedgeMin = node.wedgeRawMin - pad;
+    node.wedgeMax = node.wedgeRawMax + pad;
   });
 
   // Trunk column height: base -> root oval -> the stacked trunk generations
@@ -785,8 +795,11 @@ export function buildBotanicalLayout(treeData, options = {}) {
       const sweepSide = (seedHash(node.data.id + '_side') > 0.5) ? 1 : -1;
       const sweepDist = 480 + (seedHash(node.data.id + '_sweep') - 0.5) * 100;
       const rawSweepAngle = node.targetAngle + sweepSide * 0.25;
-      const sweepAngle = Math.min(node.wedgeMax - WEDGE_PAD / 2,
-        Math.max(node.wedgeMin + WEDGE_PAD / 2, rawSweepAngle));
+      // Clamp into the subtree's own un-padded extent (the pad is relative
+      // now, so subtracting a fixed WEDGE_PAD/2 here would over- or
+      // under-shoot depending on twig density).
+      const sweepAngle = Math.min(node.wedgeRawMax,
+        Math.max(node.wedgeRawMin, rawSweepAngle));
       node.x3 = cx + Math.cos(sweepAngle) * sweepDist;
       node.y3 = cy - 120 + Math.sin(node.targetAngle) * sweepDist * 0.7;
       // Record how far the sweep actually reached, so descendants continue

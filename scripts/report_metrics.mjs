@@ -3,14 +3,16 @@
  * in Node with the exact options renderTree uses, printing the deterministic
  * expected numbers for any given code state. No browser involved.
  *
- * Usage: node scripts/report_metrics.mjs
+ * Usage: node scripts/report_metrics.mjs [dataset.json]
+ *   defaults to tree.json; pass e.g. tree_1000.json for the scale diagnostic.
  */
 import { readFileSync } from 'fs';
 import { buildBotanicalLayout } from '../src/treeLayout.js';
 import { computeLayoutMetrics } from '../src/layoutMetrics.js';
 
+const dataset = process.argv[2] || 'tree.json';
 const treeData = JSON.parse(
-  readFileSync(new URL('../tree.json', import.meta.url), 'utf8')
+  readFileSync(new URL(`../${dataset}`, import.meta.url), 'utf8')
 );
 
 // MUST mirror renderTree() options in src/main.js

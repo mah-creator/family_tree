@@ -66,10 +66,15 @@ export class QuadtreeCuller {
       } else {
         el.style.display = '';
 
-        // Correction #5: Explicit Text-LOD rule - <text> elements exist DOM-wise or display-wise only when zoomed in
-        const textEl = el.querySelector('text, .leaf-text, .founder-text, .trunk-text');
-        if (textEl) {
-          textEl.style.display = showText ? '' : 'none';
+        // Explicit Text-LOD rule: <text> shows only when zoomed in.
+        // querySelectorAll, not querySelector — a trunk node carries a name
+        // AND a bio line, and a founder a name AND its family label, so the
+        // single-match version left every second label painted at far zoom.
+        // Invisible at 117 nodes; 18 leaked at 1,000, and it scales with the
+        // founder count.
+        const textEls = el.querySelectorAll('text, .leaf-text, .founder-text, .trunk-text');
+        for (let i = 0; i < textEls.length; i++) {
+          textEls[i].style.display = showText ? '' : 'none';
         }
 
         // Correction #4: Gated ambient sway applied ONLY to in-viewport leaves below count threshold
