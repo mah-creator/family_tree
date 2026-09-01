@@ -1,5 +1,7 @@
 import * as d3 from 'd3';
-import { LEAF_MIN_CENTER_DIST, LEAF_CENTER_OFFSET } from './leafGeometry.js';
+import {
+  LEAF_MIN_CENTER_DIST, LEAF_CENTER_OFFSET, LEAF_WIDTH, LEAF_HEIGHT
+} from './leafGeometry.js';
 
 /**
  * Layout self-metrics — computed from the layout model (not the DOM) so numbers
@@ -131,9 +133,21 @@ export function computeLayoutMetrics(layoutResult) {
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
 
+  // Mark every cell the leaf's body covers, not just the one under its centre.
+  // Centre-only marking capped fill at (leaf count / cells) regardless of how
+  // large the leaves actually were, so it could not register the 1.45x scale-up
+  // at all and read "sparse" for two different reasons at once.
   const occupied = new Set();
+  const halfW = LEAF_WIDTH / 2;
+  const halfH = LEAF_HEIGHT / 2;
   leafCenters.forEach(l => {
-    occupied.add(`${Math.floor(l.x / FILL_CELL)},${Math.floor(l.y / FILL_CELL)}`);
+    const gx0 = Math.floor((l.x - halfW) / FILL_CELL);
+    const gx1 = Math.floor((l.x + halfW) / FILL_CELL);
+    const gy0 = Math.floor((l.y - halfH) / FILL_CELL);
+    const gy1 = Math.floor((l.y + halfH) / FILL_CELL);
+    for (let gx = gx0; gx <= gx1; gx++) {
+      for (let gy = gy0; gy <= gy1; gy++) occupied.add(`${gx},${gy}`);
+    }
   });
 
   // Overall: ellipse inscribed in the leaf bounding box
@@ -194,6 +208,56 @@ export function computeLayoutMetrics(layoutResult) {
     if (maxY > trunkBaseY - 100) branchesBelowGrassMargin++;
   });
 
+  // ---------- 5b. Junction turning ----------
+  // Angle between a parent's exit tangent and the child's own chord. A child
+  // whose allocated angle sits far from where its parent arrives heads back
+  // the way the parent came, and the pair reads as a switchback loop — which
+  // no per-branch curvature check catches, because each segment is individually
+  // smooth and the reversal happens ACROSS the junction. Target: max < 70°,
+  // zero above 90°.
+  let junctionTurningMaxDeg = 0;
+  let junctionTurningOver90 = 0;
+  let junctionTurningWorstId = null;
+  descendants.forEach(node => {
+    const p = node.parent;
+    if (!p || p.exitTangent === undefined || !node.p0 || !node.p3) return;
+    // Depth-1 limbs are excluded: they leave the vertical trunk at
+    // deliberately wide angles, so a large turn there is the intended
+    // attachment rather than a doubling-back. They are exempt from the
+    // constraint too, for the same reason.
+    if (node.depth <= 1) return;
+    const chord = Math.atan2(node.p3.y - node.p0.y, node.p3.x - node.p0.x);
+    let d = chord - p.exitTangent;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    const deg = Math.abs((d * 180) / Math.PI);
+    if (deg > junctionTurningMaxDeg) {
+      junctionTurningMaxDeg = deg;
+      junctionTurningWorstId = node.data.id;
+    }
+    if (deg > 90) junctionTurningOver90++;
+  });
+
+  // ---------- 5c. Per-limb angular width vs leaf share ----------
+  // If arc allocation is proportional, a limb's share of the sector should
+  // match its share of the leaves. A limb far wider than its leaf count
+  // justifies means allocation is inserting slack — an empty wedge in the
+  // canopy that no amount of silhouette noise would fix.
+  const limbStats = [];
+  (root.children || []).forEach(limb => {
+    const limbLeaves = limb.leaves ? limb.leaves() : [];
+    const angles = limbLeaves.map(l => l.targetAngle).filter(a => a !== undefined);
+    if (!angles.length) return;
+    const widthDeg = ((Math.max(...angles) - Math.min(...angles)) * 180) / Math.PI;
+    limbStats.push({
+      id: limb.data.id,
+      leaves: limbLeaves.length,
+      leafSharePct: +((100 * limbLeaves.length) / leaves.length).toFixed(1),
+      angularWidthDeg: +widthDeg.toFixed(1),
+      angularSharePct: +((100 * widthDeg) / layoutResult.sector.sectorSpanDeg).toFixed(1)
+    });
+  });
+
   // ---------- 6. Poster-grounded canopy position ----------
   // Replaces the old flank-fill boxes (80–460px beside the trunk), which were
   // unsatisfiable by construction: the innermost radial band sits at
@@ -225,6 +289,9 @@ export function computeLayoutMetrics(layoutResult) {
     lowestLeafFrac,
     canopyLowerEdgeFrac,
     curlCount,
+    junctionTurningMaxDeg: +junctionTurningMaxDeg.toFixed(1),
+    junctionTurningOver90,
+    junctionTurningWorstId,
     branchesBelowTrunkBase,
     branchesBelowGrassMargin,
     totalLeaves: leaves.length,
@@ -244,6 +311,7 @@ export function computeLayoutMetrics(layoutResult) {
     R_min,
     radiusUsed: baseCanopyRadius,
     canopyFillPct: insideCells ? +(100 * filledCells / insideCells).toFixed(1) : 0,
+    limbStats,
     leafBBox: {
       minX: Math.round(minX), maxX: Math.round(maxX),
       minY: Math.round(minY), maxY: Math.round(maxY)

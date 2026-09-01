@@ -53,6 +53,19 @@ const TWIG_T_BY_COUNT = { 1: [1.0], 2: [0.7, 1.0], 3: [0.45, 0.72, 1.0] };
 const TWIG_LEAF_HEIGHT_PX = LEAF_HEIGHT;
 // Minimum radial advance of a leaf past its own parent (fix 3).
 const MIN_LEAF_ADVANCE_PX = 70;
+// Floor on canopy radius, independent of R_min, so a very small tree still
+// reads as a tree. R_min * 1.12 dominates for any realistic dataset.
+const CANOPY_STRUCTURAL_MIN = 420;
+// Max angle between a parent's heading and its child's, enforced in
+// allocation (see constrainJunctionTurning). Beyond this the child doubles
+// back across the junction and the pair reads as a switchback loop.
+const MAX_JUNCTION_TURN = (70 * Math.PI) / 180;
+// Branch flex: perpendicular control-point offset as a fraction of branch
+// length, interpolated by branch width. Was a flat 0.14 for everything.
+const FLEX_THIN = 0.24;   // terminal twigs bend hard
+const FLEX_THICK = 0.055; // trunk limbs stay nearly straight
+const FLEX_MIN_WIDTH = 2;
+const FLEX_MAX_WIDTH = 40;
 // Fix 4: angular padding added to each side of a node's subtree wedge.
 const WEDGE_PAD = (4 * Math.PI) / 180;
 // Depth-1 limb attachment band, as a fraction of trunk length. The floor was
@@ -209,6 +222,55 @@ function lineageStepFor(node, lineageInfoById, globalStep) {
 
 function findDepth1Ancestor(node) {
   return node.ancestors().find(a => a.depth === 1) || node;
+}
+
+/**
+ * Shifts every leaf angle in `node`'s subtree by `delta`, keeping the
+ * subtree's internal spacing and order intact.
+ */
+function shiftSubtreeAngles(node, delta) {
+  node.each(d => {
+    if (d.targetAngle !== undefined) d.targetAngle += delta;
+    if (d.wedgeRawMin !== undefined) d.wedgeRawMin += delta;
+    if (d.wedgeRawMax !== undefined) d.wedgeRawMax += delta;
+    if (d.wedgeMin !== undefined) d.wedgeMin += delta;
+    if (d.wedgeMax !== undefined) d.wedgeMax += delta;
+  });
+}
+
+/**
+ * Keeps each subtree's angular range within MAX_JUNCTION_TURN of the heading
+ * its parent arrives on, so no child ever doubles back across its own
+ * junction. Rigid shift only — never compresses — so leaf order and relative
+ * spacing (and therefore contiguity and the planarity ordering) are preserved.
+ */
+function constrainJunctionTurning(root) {
+  let shifted = 0;
+  const walk = (node, incomingHeading, constrain) => {
+    const kids = node.children || [];
+    kids.forEach(child => {
+      if (child.targetAngle === undefined) return;
+      if (constrain) {
+        const dev = normalizeSignedAngle(child.targetAngle - incomingHeading);
+        let delta = 0;
+        if (dev > MAX_JUNCTION_TURN) delta = MAX_JUNCTION_TURN - dev;
+        else if (dev < -MAX_JUNCTION_TURN) delta = -MAX_JUNCTION_TURN - dev;
+        if (delta !== 0) {
+          shiftSubtreeAngles(child, delta);
+          shifted++;
+        }
+      }
+      // The child's own heading is the direction it now travels.
+      walk(child, child.targetAngle, true);
+    });
+  };
+  // Depth-1 limbs are exempt: they leave the trunk at deliberately wide
+  // angles (fixes 1 and 2), and constraining them against the trunk's
+  // vertical heading pinned every limb into a +/-70 deg cone about vertical,
+  // undoing the below-horizontal reach and lifting the canopy off the grass
+  // (lowestLeafFrac 0.066 -> 0.292). The switchbacks were all deeper anyway.
+  walk(root, -Math.PI / 2, false);
+  return shifted;
 }
 
 /**
@@ -401,18 +463,36 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const rightmostAngle = -Math.PI / 2 + sectorWidthRad / 2; // Right side start (~25 deg, past horizontal)
   const leftmostAngle = -Math.PI / 2 - sectorWidthRad / 2;  // Left side end (~-205 deg, past horizontal)
 
-  // R_min = clearance * N / (3 * sectorWidth * 0.74). N is twig count, not
-  // leaf count — a twig with alternating clustered members is wider than one
-  // leaf (leaf height plus ~2x the nudge), so the clearance term is not just
-  // leaf height, or angular slots would be spaced for a single leaf and
-  // quietly collide. Both terms live in leafGeometry.js and scale with the
-  // leaf, so enlarging leaves widens the required radius automatically.
-  const R_min = (TWIG_ANGULAR_CLEARANCE * N) / (3 * sectorWidthRad * 0.74);
-  // Fix 3: dropped the flat 1150 floor — a single global minimum stopped
-  // making sense once radial reach became per-lineage (below); baseCanopyRadius
-  // is now purely R_min-derived (the angular-slot tangential-spacing guarantee
-  // it still needs to satisfy).
-  const baseCanopyRadius = R_min / 0.74 + 180;
+  // Radial bands. Widened from [0.74, 0.94, 1.14] (a 40% span) to 52%: with
+  // every leaf at depth 2–3 the discrete generation rings are a real part of
+  // what reads as sparse, and a wider spread plus per-leaf jitter breaks the
+  // ring. Declared before R_min because R_min depends on the innermost band.
+  const radialBands = [0.62, 0.88, 1.14];
+
+  // Consecutive twigs alternate bands, so two twigs sharing a band are 3
+  // apart in index: their angular separation is 3 * sectorWidth / N, and the
+  // arc between them is tightest in the INNERMOST band. Hence
+  //   R_min = clearance * N / (3 * sectorWidth * innermostBand).
+  // That factor used to be hardcoded 0.74; widening the bands to 0.62 without
+  // it left the inner band inside its own guarantee and leaf collisions went
+  // 7 -> 33. N is twig count, not leaf count — a twig with alternating
+  // clustered members is wider than one leaf. Both the clearance and the leaf
+  // size live in leafGeometry.js, so scaling the leaf widens the radius.
+  const R_min = (TWIG_ANGULAR_CLEARANCE * N) / (3 * sectorWidthRad * radialBands[0]);
+
+  // R_min IS the radius at which the tightest band clears, so the radius is
+  // R_min plus a margin, rather than the old "divide by 0.74 a second time
+  // and add a flat 180".
+  //
+  // The margin is 1.40, not the 1.12 that the apparent 68% slack suggested.
+  // Measuring the tradeoff directly: 1.12 -> radius 720, fill 13.6%, 28 leaf
+  // collisions; 1.40 -> 900, 12.4%, 14; 1.68 (~the old value) -> 1080, 11.9%,
+  // 8. Squeezing the canopy buys ~1.7 points of fill and quadruples overlap,
+  // because this value is not really the canopy radius: originLead (the
+  // limb's trunk-attachment compensation) dominates a leaf's actual distance,
+  // which runs 1.9-3.8x this number. Most of the apparent sparsity was the
+  // fill metric marking only the cell under each leaf's centre.
+  const baseCanopyRadius = Math.max(R_min * 1.40, CANOPY_STRUCTURAL_MIN);
 
   // 4. Part A - Step 2 & 3: Place Twigs by Index into Size-Aware Radial Bands
   // with Irregular Silhouette. Fix 3: band tier now comes from the twig's
@@ -422,7 +502,6 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // lineage-root * one shared per-generation step (computeLineageInfo) — the
   // same base quantity the internal-node formula below uses, instead of a
   // canopy-wide value computed independently of depth.
-  const radialBands = [0.74, 0.94, 1.14];
   // Full canopy radius, not the old 0.65 fraction of it: the fraction was
   // tuned when leaf radius was computed independently of this span, and
   // keeping it here left the outermost leaves short of R_min.
@@ -469,23 +548,20 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
     // Part A - Step 6: Organic ±12% length jitter seeded off node id
     const jitter = (seedHash(repNode.data.id + '_rad') - 0.5) * 0.24; // ±12%
-    const rawRadius = relativeDepth * step * bandMultiplier * (1 + noise) * (1 + jitter);
 
-    // Explicit clearance past this leaf's own parent. Band + noise + jitter
-    // can otherwise multiply a leaf's whole accumulated radius down below its
-    // parent's (7.9px gaps in ~36% of twigs when this was unguarded), which
-    // then fed a near-zero vector into the twig-length scaling below. Stating
-    // the invariant here — a leaf always sits at least one useful step past
-    // its parent — is what makes that downstream floor a true edge-case
-    // guard rather than the thing holding the layout together.
-    const parentRadius = Math.max(0, relativeDepth - 1) * step;
-    const leafRadius = Math.max(rawRadius, parentRadius + MIN_LEAF_ADVANCE_PX);
-
+    // How far this leaf reaches PAST ITS PARENT — not an absolute radius.
+    // The absolute form (originLead + relativeDepth * step) was not monotonic
+    // parent-to-child: a swept limb (fix 7) sits ~525 from its origin while
+    // its children resolved to ~393, i.e. inside their own parent, so the
+    // chord pointed backwards and the junction read as a switchback loop.
+    // Those were the 178 deg junction turns, and their angle difference was
+    // only 0-7 deg — the reversal was radial, not angular. Accumulating from
+    // the parent in the position pass makes monotonic growth structural.
     repNode.targetAngle = baseAngle;
-    repNode.targetRadius = leafRadius;
-    // originLead (limb-attachment height compensation) is added later, in
-    // the position pass, once limbOrigin is known — see the leaf-placement
-    // block below.
+    repNode.radialAdvance = Math.max(
+      step * bandMultiplier * (1 + noise) * (1 + jitter),
+      MIN_LEAF_ADVANCE_PX
+    );
 
     // Other twig members share the representative's angle (needed by the
     // ancestor angle-averaging pass below); their own position comes later
@@ -515,6 +591,20 @@ export function buildBotanicalLayout(treeData, options = {}) {
     });
     node.targetAngle = sumAngle / node.children.length;
   });
+
+  // Junction-turning constraint: a subtree's angular range must stay within
+  // MAX_JUNCTION_TURN of the heading its parent arrives on. Without this a
+  // child allocated ~180° from its parent's approach dutifully heads back the
+  // way the parent came, and the pair reads as a switchback loop. No
+  // per-branch curvature check catches it — each segment is individually
+  // smooth and the reversal happens ACROSS the junction — and no geometry
+  // clamp can fix it either, because the child's ENDPOINT is already there.
+  // It has to be corrected in allocation, by moving the range.
+  //
+  // Applied top-down so a shifted parent constrains its own children, and the
+  // whole subtree moves rigidly: leaves keep their relative order and spacing,
+  // so contiguity and the planarity ordering both survive.
+  constrainJunctionTurning(root);
 
   // Fix 4: per-node wedge — the angular interval (about the polar center) the
   // node's subtree leaves occupy, padded WEDGE_PAD each side. Contiguous
@@ -600,6 +690,9 @@ export function buildBotanicalLayout(treeData, options = {}) {
         frac: 1, // already at full trunk height: no originLead compensation
         entryTangent: -Math.PI / 2
       };
+      // Children measure their radius from this node's own position, so the
+      // accumulated distance restarts here.
+      node.radialDist = 0;
       return;
     }
 
@@ -610,13 +703,19 @@ export function buildBotanicalLayout(treeData, options = {}) {
     // comparable between a low-attaching limb and a high-attaching one
     const originLead = origin ? trunkColumnHeight * (1 - origin.frac) : trunkColumnHeight;
 
+    // Radius accumulates from the parent so it is monotonic by construction.
+    // A depth-1 limb starts at originLead (its trunk-attachment compensation);
+    // everything below adds its own advance to whatever its parent reached.
+    const parentRadialDist = node.parent.radialDist !== undefined
+      ? node.parent.radialDist
+      : originLead;
+
     if (!node.children || node.children.length === 0) {
       // Terminal leaf (twig representative): polar placement around the
-      // owning limb origin. originLead compensates for where along the
-      // trunk this limb attaches (Fix 1); node.targetRadius is the
-      // depth-based-plus-band radius computed above (Fix 3).
-      let x3 = cx + Math.cos(node.targetAngle) * (originLead + node.targetRadius) * 1.05;
-      let y3 = cy + Math.sin(node.targetAngle) * (originLead + node.targetRadius) * 0.85;
+      // owning limb origin, one radialAdvance past its parent.
+      node.radialDist = parentRadialDist + node.radialAdvance;
+      let x3 = cx + Math.cos(node.targetAngle) * node.radialDist * 1.05;
+      let y3 = cy + Math.sin(node.targetAngle) * node.radialDist * 0.85;
 
       // Cluster fix: scale the twig's own length (parent tip -> this node)
       // with member count, so a multi-leaf cluster has room along the spine.
@@ -690,6 +789,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
         Math.max(node.wedgeMin + WEDGE_PAD / 2, rawSweepAngle));
       node.x3 = cx + Math.cos(sweepAngle) * sweepDist;
       node.y3 = cy - 120 + Math.sin(node.targetAngle) * sweepDist * 0.7;
+      // Record how far the sweep actually reached, so descendants continue
+      // OUTWARD from it. Without this they resolved to a smaller radius than
+      // their own swept parent and doubled back across the junction.
+      node.radialDist = Math.hypot((node.x3 - cx) / 1.05, (node.y3 - cy) / 0.85);
       // Fix 4: nothing below the ground line (reaching it is fine)
       if (node.y3 > trunkBaseY) node.y3 = trunkBaseY;
       return;
@@ -699,10 +802,13 @@ export function buildBotanicalLayout(treeData, options = {}) {
     // globalStep the leaf radius above uses — a lineage hanging off a trunk
     // node no longer inherits that trunk node's own traversal depth as if it
     // were generations of its own.
-    const internalDepth1Ancestor = findDepth1Ancestor(node);
-    const internalRelativeDepth = node.depth - internalDepth1Ancestor.depth;
     const internalStep = lineageStepFor(node, lineageInfoById, globalStep);
-    const r = originLead + internalRelativeDepth * internalStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
+    // One step past the parent, never an absolute depth-derived radius —
+    // see the radialAdvance note in the arc-allocation loop.
+    const r = node.depth === 1
+      ? originLead
+      : parentRadialDist + internalStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
+    node.radialDist = r;
     node.x3 = cx + Math.cos(node.targetAngle) * r * 1.05;
     node.y3 = cy + Math.sin(node.targetAngle) * r * 0.85;
     // Fix 4: internal junctions were never ground-clamped (only leaves were) —
@@ -710,6 +816,36 @@ export function buildBotanicalLayout(treeData, options = {}) {
     // the trunk base. Reaching the ground line is allowed; crossing it isn't.
     if (node.y3 > trunkBaseY) node.y3 = trunkBaseY;
   });
+
+  // Local leaf-density probe for the space-filling bias. Built from the leaf
+  // positions the position pass just produced (twig representatives carry the
+  // twig's whole cluster), so a twig can tell which side of itself is emptier.
+  const densityPoints = orderedTwigs
+    .map(t => t.representative)
+    .filter(n => n && isFinite(n.x3) && isFinite(n.y3))
+    .map(n => ({ x: n.x3, y: n.y3, id: n.data.id }));
+  const densityTree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(densityPoints);
+  const DENSITY_RADIUS = 220;
+  const densityProbe = (px, py, selfNode) => {
+    let count = 0;
+    const r2 = DENSITY_RADIUS * DENSITY_RADIUS;
+    densityTree.visit((qn, qx0, qy0, qx1, qy1) => {
+      if (!qn.length) {
+        let q = qn;
+        do {
+          const d = q.data;
+          if (d.id !== selfNode.data.id) {
+            const dx = d.x - px, dy = d.y - py;
+            if (dx * dx + dy * dy < r2) count++;
+          }
+          q = q.next;
+        } while (q);
+      }
+      return qx0 > px + DENSITY_RADIUS || qx1 < px - DENSITY_RADIUS ||
+             qy0 > py + DENSITY_RADIUS || qy1 < py - DENSITY_RADIUS;
+    });
+    return count;
+  };
 
   // 6. Compute S-Curved Branch Geometry (Part B - Step 8) from root down to leaves
   root.eachBefore(node => {
@@ -757,7 +893,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
       cy: node.limbOrigin ? node.limbOrigin.y : trunkBaseY,
       grassY: trunkBaseY,
       rightmostAngle
-    });
+    }, densityProbe);
   });
 
   // 7. Cluster fix: position non-representative twig members by sampling
@@ -956,7 +1092,7 @@ function computeTrunkSpineGeometry(rootNode) {
  * Compound Bézier where P1 extends along parent exit tangent (~40%)
  * and P2 approaches destination from child heading, with opposite perpendicular offsets.
  */
-function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx) {
+function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx, densityProbe) {
   const x0 = node.x0;
   const y0 = node.y0;
   const x3 = node.x3;
@@ -990,8 +1126,35 @@ function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx) {
   const n3x = -t3y;
   const n3y = t3x;
 
-  // Seeded perpendicular offsets of opposite sign (producing organic S-curve)
-  const s1 = (seedHash(node.data.id + '_s1') - 0.5) * 0.28 * L;
+  // Seeded perpendicular offsets of opposite sign (producing organic S-curve).
+  // Amplitude is inversely proportional to branch width rather than a flat
+  // ~14% for everything: thick trunk limbs stay nearly straight, fine twigs
+  // snake hard. That is botanically true, and in the poster that flexibility
+  // is a large part of how the foliage fills space — near-straight radials
+  // waste the gaps between them.
+  const widthT = Math.max(0, Math.min(1,
+    (node.baseWidth - FLEX_MIN_WIDTH) / (FLEX_MAX_WIDTH - FLEX_MIN_WIDTH)
+  ));
+  const flex = FLEX_THIN + (FLEX_THICK - FLEX_THIN) * widthT;
+
+  // Space-filling bias: nudge the bulge toward whichever side of the branch
+  // has less foliage nearby, so twigs curve into gaps instead of paralleling
+  // their neighbours. Sign only — magnitude still comes from the seeded
+  // offset — and it is applied within the wedge clamp below, so it can never
+  // push a twig into a neighbouring subtree.
+  let s1 = (seedHash(node.data.id + '_s1') - 0.5) * 2 * flex * L;
+  const isTerminal = node.isLeafNode || !node.children || node.children.length === 0;
+  if (isTerminal && densityProbe) {
+    const mx = (x0 + x3) / 2, my = (y0 + y3) / 2;
+    const nx = -Math.sin(childHeading), ny = Math.cos(childHeading);
+    const probe = Math.max(40, 0.5 * L);
+    const lhs = densityProbe(mx + nx * probe, my + ny * probe, node);
+    const rhs = densityProbe(mx - nx * probe, my - ny * probe, node);
+    if (lhs !== rhs) {
+      const towardEmptier = lhs < rhs ? 1 : -1;
+      s1 = Math.abs(s1) * towardEmptier;
+    }
+  }
   const s2 = -s1 * 0.85;
 
   let p1x = x0 + t0x * (0.40 * L) + n0x * s1;
