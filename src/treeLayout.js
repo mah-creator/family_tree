@@ -50,12 +50,43 @@ export function computeSubtreeSizes(root) {
 // along the twig's own finished Bézier spine (see collectOrderedTwigs and
 // applyTwigMemberSampling).
 const TWIG_T_BY_COUNT = { 1: [1.0], 2: [0.7, 1.0], 3: [0.45, 0.72, 1.0] };
+
+/**
+ * Sample points along a twig for a cluster of `k` leaves. 1–3 keep their
+ * hand-tuned spreads; 4–6 spread evenly from a start that backs off as the
+ * cluster grows, floored at 0.25 so the first leaf never sits on the junction.
+ * The along-twig spacing floor still applies — longer clusters simply make
+ * the twig longer (see the length scaling in the leaf-placement block).
+ */
+function twigTValues(k) {
+  if (TWIG_T_BY_COUNT[k]) return TWIG_T_BY_COUNT[k];
+  const tMin = Math.max(0.25, 1 - (k - 1) * 0.22);
+  const out = [];
+  for (let i = 0; i < k; i++) out.push(tMin + (1 - tMin) * (i / (k - 1)));
+  TWIG_T_BY_COUNT[k] = out;
+  return out;
+}
 const TWIG_LEAF_HEIGHT_PX = LEAF_HEIGHT;
 // Minimum radial advance of a leaf past its own parent (fix 3).
 const MIN_LEAF_ADVANCE_PX = 70;
 // Floor on canopy radius, independent of R_min, so a very small tree still
 // reads as a tree. R_min * 1.12 dominates for any realistic dataset.
 const CANOPY_STRUCTURAL_MIN = 420;
+// Radial band envelope, as fractions of canopy radius. The band COUNT is
+// derived from twig count (see buildBotanicalLayout); these bound the spread.
+const BAND_INNERMOST = 0.55;
+const BAND_OUTERMOST = 1.15;
+// Minimum radial gap between adjacent bands: leaves point radially, so
+// consecutive rings need a leaf length plus margin between them.
+const BAND_RADIAL_CLEARANCE_PX = 60;
+// Branch taper guards (see the taper block in the geometry pass).
+// Of trunk base width. Specified as 0.012, but at a 56px trunk that is
+// 0.67px — below the 0.92px the taper clamp already produces at 2,000 nodes,
+// so it never binds and terminal twigs stay hairline. 0.05 holds them at
+// 2.8px across all three scales (matching the 3.11px the 117-leaf set gets
+// naturally) with no measured cost to canopy fill.
+const MIN_BRANCH_WIDTH_FRAC = 0.05;
+const MIN_TAPER_RATIO = 0.55;        // per junction
 // Max angle between a parent's heading and its child's, enforced in
 // allocation (see constrainJunctionTurning). Beyond this the child doubles
 // back across the junction and the pair reads as a switchback loop.
@@ -122,13 +153,13 @@ function balancedChunks(arr, maxSize) {
  * the reference poster's leaf clusters rather than one branch per leaf.
  * Subtrees occupy strictly contiguous index intervals, making crossings impossible.
  */
-export function collectOrderedTwigs(root) {
+export function collectOrderedTwigs(root, maxPerTwig = 3) {
   const leaves = [];
   const twigs = [];
 
   function flushPool(pool, parent) {
     if (pool.length === 0) return;
-    balancedChunks(pool, 3).forEach(chunk => {
+    balancedChunks(pool, maxPerTwig).forEach(chunk => {
       const representative = chunk[chunk.length - 1];
       const twig = { id: representative.data.id, parent, members: chunk, representative };
       chunk.forEach((m, i) => {
@@ -197,7 +228,8 @@ function computeLineageInfo(root, availableRadialSpan, radialBands) {
 
   const sortedBySize = depth1Nodes.slice().sort((a, b) => (a.subtreeSize || 1) - (b.subtreeSize || 1));
   sortedBySize.forEach((node, rank) => {
-    const tierIndex = Math.min(2, Math.floor((rank / sortedBySize.length) * 3));
+    const tierIndex = Math.min(radialBands.length - 1,
+      Math.floor((rank / sortedBySize.length) * radialBands.length));
     // The tier scales the lineage's whole PER-GENERATION step, not just its
     // final one: a small lineage genuinely terminates closer to the trunk
     // (which is what fills the flanks) instead of merely ending a few px
@@ -512,7 +544,13 @@ export function buildBotanicalLayout(treeData, options = {}) {
 
   // 2. Part A - Step 1: Collect Ordered Leaves & group them into twigs
   // (clusters of up to 3 sibling leaves sharing one branch — see collectOrderedTwigs)
-  const { leaves: orderedLeaves, twigs: collectedTwigs } = collectOrderedTwigs(root);
+  // Cluster size scales with the tree: the poster shows clusters of 3–6, so
+  // larger clusters at scale are more faithful, not less — and every extra
+  // member removes a twig, which feeds straight back into R_min (twig count
+  // is its numerator).
+  const leafCountForTwigs = root.leaves().length;
+  const maxPerTwig = Math.max(3, Math.min(6, 3 + Math.floor(leafCountForTwigs / 250)));
+  const { leaves: orderedLeaves, twigs: collectedTwigs } = collectOrderedTwigs(root, maxPerTwig);
   // Planarity by nested ordering: reorder limb blocks so lower attachments own
   // more-lateral angular ranges (see planLimbLayout). Twig order within a limb
   // — and therefore every subtree's contiguity — is preserved.
@@ -534,22 +572,29 @@ export function buildBotanicalLayout(treeData, options = {}) {
   const rightmostAngle = -Math.PI / 2 + sectorWidthRad / 2; // Right side start (~25 deg, past horizontal)
   const leftmostAngle = -Math.PI / 2 - sectorWidthRad / 2;  // Left side end (~-205 deg, past horizontal)
 
-  // Radial bands. Widened from [0.74, 0.94, 1.14] (a 40% span) to 52%: with
-  // every leaf at depth 2–3 the discrete generation rings are a real part of
-  // what reads as sparse, and a wider spread plus per-leaf jitter breaks the
-  // ring. Declared before R_min because R_min depends on the innermost band.
-  const radialBands = [0.62, 0.88, 1.14];
+  // Radial bands. The COUNT scales with twig count — it used to be hardcoded
+  // at 3, which packed every twig into a fixed number of rings and made
+  // capacity = sector * r / clearance. That is 1-D packing of a 2-D space:
+  // r grew linearly with N (R_min 643 at 64 twigs, 3204 at 319), so the
+  // canopy exploded outward into thin radial spokes instead of filling an
+  // area. The poster packs leaves at many radii inside a bounded canopy.
+  // With B bands the angular slots per band are N/B, so R_min ∝ N/B ∝ √N.
+  const bandCount = Math.max(3, Math.min(14, Math.round(Math.sqrt(N / 7))));
+  const radialBands = [];
+  for (let i = 0; i < bandCount; i++) {
+    radialBands.push(
+      BAND_INNERMOST + (BAND_OUTERMOST - BAND_INNERMOST) * (bandCount === 1 ? 0 : i / (bandCount - 1))
+    );
+  }
 
-  // Consecutive twigs alternate bands, so two twigs sharing a band are 3
-  // apart in index: their angular separation is 3 * sectorWidth / N, and the
+  // Consecutive twigs step through the bands, so two twigs sharing a band are
+  // B apart in index: their angular separation is B * sectorWidth / N, and the
   // arc between them is tightest in the INNERMOST band. Hence
-  //   R_min = clearance * N / (3 * sectorWidth * innermostBand).
-  // That factor used to be hardcoded 0.74; widening the bands to 0.62 without
-  // it left the inner band inside its own guarantee and leaf collisions went
-  // 7 -> 33. N is twig count, not leaf count — a twig with alternating
-  // clustered members is wider than one leaf. Both the clearance and the leaf
-  // size live in leafGeometry.js, so scaling the leaf widens the radius.
-  const R_min = (TWIG_ANGULAR_CLEARANCE * N) / (3 * sectorWidthRad * radialBands[0]);
+  //   R_min = clearance * (N / B) / (sectorWidth * innermostBand).
+  // N is twig count, not leaf count — a twig with alternating clustered
+  // members is wider than one leaf. Clearance and leaf size live in
+  // leafGeometry.js, so scaling the leaf widens the radius.
+  const R_min = (TWIG_ANGULAR_CLEARANCE * (N / bandCount)) / (sectorWidthRad * radialBands[0]);
 
   // R_min IS the radius at which the tightest band clears, so the radius is
   // R_min plus a margin, rather than the old "divide by 0.74 a second time
@@ -563,7 +608,18 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // limb's trunk-attachment compensation) dominates a leaf's actual distance,
   // which runs 1.9-3.8x this number. Most of the apparent sparsity was the
   // fill metric marking only the cell under each leaf's centre.
-  const baseCanopyRadius = Math.max(R_min * 1.40, CANOPY_STRUCTURAL_MIN);
+  // Two constraints now, where the single-ring model only ever had one:
+  //  - angular: twigs sharing a band must clear each other along their arc.
+  //  - radial: adjacent BANDS must clear a leaf length plus margin, because
+  //    leaves point radially. With one ring this could never bind; with B
+  //    rings it can, and it is what stops the bands collapsing into each other
+  //    as B grows.
+  const angularRadius = R_min * 1.40;
+  const radialRadius = (bandCount * BAND_RADIAL_CLEARANCE_PX) /
+    (BAND_OUTERMOST - BAND_INNERMOST);
+  const baseCanopyRadius = Math.max(angularRadius, radialRadius, CANOPY_STRUCTURAL_MIN);
+  const bindingConstraint = baseCanopyRadius === CANOPY_STRUCTURAL_MIN ? 'structural-min'
+    : (angularRadius >= radialRadius ? 'angular' : 'radial');
 
   // 4. Part A - Step 2 & 3: Place Twigs by Index into Size-Aware Radial Bands
   // with Irregular Silhouette. Fix 3: band tier now comes from the twig's
@@ -615,7 +671,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
     // (they all sit at the same depth) leaves the inner canopy structurally
     // empty no matter how the lineage tier is tuned.
     const localIdx = lineageLocalIdx.get(twig.id) || 0;
-    const bandMultiplier = radialBands[localIdx % 3];
+    const bandMultiplier = radialBands[localIdx % radialBands.length];
 
     // Part A - Step 6: Organic ±12% length jitter seeded off node id
     const jitter = (seedHash(repNode.data.id + '_rad') - 0.5) * 0.24; // ±12%
@@ -842,7 +898,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
         let scale = 1 + 0.35 * (memberCount - 1);
 
         if (memberCount > 1) {
-          const tValues = TWIG_T_BY_COUNT[memberCount] || TWIG_T_BY_COUNT[3];
+          const tValues = twigTValues(memberCount);
           const minTGap = minConsecutiveDiff(tValues);
           const requiredLen = (TWIG_MIN_SPACING_PX / minTGap) * 1.1;
           if (baseLen * scale < requiredLen) scale = requiredLen / baseLen;
@@ -963,12 +1019,16 @@ export function buildBotanicalLayout(treeData, options = {}) {
     }
 
     // Width tapering
+    // Taper, with two guards. sqrt(childSubtree / parentSubtree) compounds
+    // over every generation, so at 9 generations terminal twigs collapsed to
+    // hairlines (1.35px at 1,000 nodes) and vanished at fit zoom. The ratio
+    // clamp stops any single junction collapsing a branch, and the floor is
+    // proportional to trunk width so it scales with the drawing rather than
+    // being an absolute 0.8px.
     const parentSize = parent.subtreeSize || 1;
     const childSize = node.subtreeSize || 1;
-    node.tipWidth = Math.max(
-      0.8,
-      node.baseWidth * Math.sqrt(childSize / parentSize)
-    );
+    const taperRatio = Math.max(MIN_TAPER_RATIO, Math.sqrt(childSize / parentSize));
+    node.tipWidth = Math.max(rootBaseWidth * MIN_BRANCH_WIDTH_FRAC, node.baseWidth * taperRatio);
 
     // Compute S-curve Bézier control points, wedge- and ground-clamped (Fix 4).
     // Clamp center = the same polar center the node's placement used.
@@ -999,6 +1059,11 @@ export function buildBotanicalLayout(treeData, options = {}) {
     R_min: Math.round(R_min),
     baseCanopyRadius: Math.round(baseCanopyRadius),
     globalStep: Math.round(globalStep),
+    bandCount,
+    bindingConstraint,
+    maxPerTwig,
+    angularRadius: Math.round(angularRadius),
+    radialRadius: Math.round(radialRadius),
     xStretchTriggerCount,
     limbOrderingViolations,
     attachments,
@@ -1041,7 +1106,7 @@ function applyTwigMemberSampling(twigs, grassClampY) {
     }
     if (!rep.p0 || !rep.p1 || !rep.p2 || !rep.p3) return;
 
-    const tValues = TWIG_T_BY_COUNT[members.length] || TWIG_T_BY_COUNT[3];
+    const tValues = twigTValues(members.length);
     const sampled = tValues.map(t => sampleCubicBezier(rep.p0, rep.p1, rep.p2, rep.p3, t));
 
     members.forEach((member, i) => {

@@ -373,8 +373,14 @@ export function computeLayoutMetrics(layoutResult) {
     crossLimbCrossings: crossLimbKeys.size,
     withinLimbCrossings: collidingPairKeys.size - crossLimbKeys.size,
     limbOrderingViolations: layoutResult.limbOrderingViolations ?? null,
+    bandCount: layoutResult.bandCount,
+    bindingConstraint: layoutResult.bindingConstraint,
+    maxPerTwig: layoutResult.maxPerTwig,
     R_min,
     radiusUsed: baseCanopyRadius,
+    canopyAspect: +((maxX - minX) / Math.max(1, maxY - minY)).toFixed(2),
+    minBranchWidthPx: +Math.min(...descendants
+      .filter(n => n.tipWidth != null).map(n => n.tipWidth)).toFixed(2),
     canopyFillPct: insideCells ? +(100 * filledCells / insideCells).toFixed(1) : 0,
     limbStats,
     leafBBox: {
