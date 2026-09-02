@@ -81,3 +81,26 @@ export const LEAF_FONT_SCALE = LEAF_SCALE;
  * something to size the whole canopy around.
  */
 export const TWIG_SLOT_MARGIN = Math.round(LEAF_HEIGHT * 0.4);
+
+/**
+ * Radial separation between adjacent leaf bands, added as an OFFSET rather
+ * than applied as a multiplier on a per-lineage step.
+ *
+ * Sized from what actually spans the radial range: a twig's own CLUSTER, not
+ * a single leaf. Members sit back along the twig at TWIG_MIN_SPACING_PX
+ * intervals, so a twig occupies roughly (members - 1) * spacing of radius;
+ * a gap sized for one leaf (65px) left members of an outer band re-entering
+ * the inner band's range, and the verification ratio came out 0.21-0.26
+ * instead of 1.0. Scales with cluster size, so small trees pay less. The nominal model claimed a 297px band gap at 1,128 leaves while
+ * colliding pairs actually sat 20px apart radially — the bands existed in the
+ * allocation and not in the drawing, because the multiplier scaled only the
+ * last step and twigs under different parents landed at the same absolute
+ * radius. As an additive offset the separation is real by construction, and
+ * because it is non-negative, parent -> child growth stays monotonic, so the
+ * junction-turning constraint needs no re-derivation.
+ */
+export function bandGapFor(maxPerTwig) {
+  return Math.round(
+    TWIG_MIN_SPACING_PX * Math.max(0, maxPerTwig - 1) * 0.7 + LEAF_MIN_CENTER_DIST * 0.5
+  );
+}

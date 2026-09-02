@@ -1,6 +1,6 @@
 import * as d3 from 'd3';
 import {
-  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_SLOT_MARGIN,
+  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_SLOT_MARGIN, bandGapFor,
   PETIOLE_ANGLE_MIN, PETIOLE_ANGLE_MAX, PETIOLE_LEN_FRAC
 } from './leafGeometry.js';
 
@@ -125,6 +125,10 @@ const MIN_TAPER_RATIO = 0.55;        // per junction
 // allocation (see constrainJunctionTurning). Beyond this the child doubles
 // back across the junction and the pair reads as a switchback loop.
 const MAX_JUNCTION_TURN = (70 * Math.PI) / 180;
+// A node must advance radially by at least this multiple of the tangential
+// distance it travels relative to its parent, so the parent->child chord stays
+// closer to radial than to sideways.
+const CHORD_RADIAL_MIN_RATIO = 0.85;
 // Branch flex: perpendicular control-point offset as a fraction of branch
 // length, interpolated by branch width. Was a flat 0.14 for everything.
 const FLEX_THIN = 0.24;   // terminal twigs bend hard
@@ -640,9 +644,20 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // lands near or below the flat-clearance value despite fixing the outliers.
   // Ordering is untouched — only slot widths change — so contiguous subtree
   // ranges, planarity and crossings are unaffected.
+  const bandGapPx = bandGapFor(maxPerTwig);
   const twigSlotWidths = orderedTwigs.map(t => twigCrossExtent(t.members) + TWIG_SLOT_MARGIN);
   const twigSlotTotal = twigSlotWidths.reduce((s, w) => s + w, 0) || 1;
-  const R_min = twigSlotTotal / (sectorWidthRad * radialBands[0] * bandCount);
+  // Angular clearance is needed only BETWEEN TWIGS IN THE SAME BAND — twigs
+  // in different bands are now separated radially by a real BAND_GAP_PX and
+  // need no angular separation at all. Same-band twigs are B apart in index,
+  // which is what dividing by bandCount expresses.
+  //
+  // The old form also divided by radialBands[0] (0.55), a discount for the
+  // innermost band sitting at 0.55 of the canopy radius. With bands as
+  // additive offsets there is no such inner ring — every leaf sits at its own
+  // accumulated radius — so that discount was inflating R_min by ~1.8x for a
+  // geometry that no longer exists.
+  const R_min = twigSlotTotal / (sectorWidthRad * bandCount);
   const twigSlotOffsets = [];
   {
     let acc = 0;
@@ -725,7 +740,9 @@ export function buildBotanicalLayout(treeData, options = {}) {
     // (they all sit at the same depth) leaves the inner canopy structurally
     // empty no matter how the lineage tier is tuned.
     const localIdx = lineageLocalIdx.get(twig.id) || 0;
-    const bandMultiplier = radialBands[localIdx % radialBands.length];
+    const bandIndex = localIdx % bandCount;
+    repNode.bandIndex = bandIndex;
+    twig.members.forEach(m => { m.bandIndex = bandIndex; });
 
     // Part A - Step 6: Organic ±12% length jitter seeded off node id
     const jitter = (seedHash(repNode.data.id + '_rad') - 0.5) * 0.24; // ±12%
@@ -738,11 +755,19 @@ export function buildBotanicalLayout(treeData, options = {}) {
     // Those were the 178 deg junction turns, and their angle difference was
     // only 0-7 deg — the reversal was radial, not angular. Accumulating from
     // the parent in the position pass makes monotonic growth structural.
+    // The band is an ADDITIVE radial offset, not a multiplier on the step.
+    // As a multiplier it scaled only this leaf's last step, so two twigs in
+    // different bands under different parents still landed at the same
+    // absolute radius — colliding leaves sat 20px apart radially against a
+    // nominal 297px band gap, and R_min's division by B was measuring a
+    // separation that did not exist. Added as an offset the separation is
+    // real, and since it is non-negative parent -> child growth stays
+    // monotonic, so the junction-turning constraint is unaffected.
     repNode.targetAngle = baseAngle;
     repNode.radialAdvance = Math.max(
-      step * bandMultiplier * (1 + noise) * (1 + jitter),
+      step * (1 + noise) * (1 + jitter),
       MIN_LEAF_ADVANCE_PX
-    );
+    ) + bandIndex * bandGapPx;
 
     // Other twig members share the representative's angle (needed by the
     // ancestor angle-averaging pass below); their own position comes later
@@ -999,9 +1024,24 @@ export function buildBotanicalLayout(treeData, options = {}) {
     const internalStep = lineageStepFor(node, lineageInfoById, globalStep);
     // One step past the parent, never an absolute depth-derived radius —
     // see the radialAdvance note in the arc-allocation loop.
+    // The advance must also cover the TANGENTIAL displacement this node makes
+    // relative to its parent, or the chord from parent to child is mostly
+    // sideways and the junction reads as a near-perpendicular kink. Measured
+    // as a 93.8 deg junction turn on a node advancing 130px radially while
+    // moving ~158px tangentially — a regression that appeared only when the
+    // canopy radius shrank, since the same angular step spans more arc at a
+    // smaller radius. Bounding advance against arc keeps the chord within
+    // ~50 deg of radial, and since it only ever INCREASES the radius,
+    // monotonic parent -> child growth is preserved.
+    const angleStep = Math.abs(normalizeSignedAngle(
+      node.targetAngle - (node.parent.targetAngle ?? node.targetAngle)));
+    const tangentialSpan = parentRadialDist * angleStep;
     const r = node.depth === 1
       ? originLead
-      : parentRadialDist + internalStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20);
+      : Math.max(
+          parentRadialDist + internalStep * (1 + (seedHash(node.data.id + '_dlen') - 0.5) * 0.20),
+          parentRadialDist + tangentialSpan * CHORD_RADIAL_MIN_RATIO
+        );
     node.radialDist = r;
     node.x3 = cx + Math.cos(node.targetAngle) * r * 1.05;
     node.y3 = cy + Math.sin(node.targetAngle) * r * 0.85;
@@ -1118,6 +1158,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
     baseCanopyRadius: Math.round(baseCanopyRadius),
     globalStep: Math.round(globalStep),
     bandCount,
+    bandGapPx,
     twigSlotWidths,
     bindingConstraint,
     maxPerTwig,
