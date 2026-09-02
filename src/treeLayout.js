@@ -97,6 +97,9 @@ const FLEX_THIN = 0.24;   // terminal twigs bend hard
 const FLEX_THICK = 0.055; // trunk limbs stay nearly straight
 const FLEX_MIN_WIDTH = 2;
 const FLEX_MAX_WIDTH = 40;
+// Flex is capped at this fraction of the arc distance to the neighbouring
+// angular slot (scale-invariant), rather than growing with branch length.
+const FLEX_ARC_FRACTION = 0.35;
 // Fix 4: angular padding added to each side of a node's subtree wedge.
 const WEDGE_PAD = (4 * Math.PI) / 180;
 // Depth-1 limb attachment band, as a fraction of trunk length. The floor was
@@ -966,6 +969,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
     .map(n => ({ x: n.x3, y: n.y3, id: n.data.id }));
   const densityTree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(densityPoints);
   const DENSITY_RADIUS = 220;
+  // Arc distance between neighbouring angular slots, per unit radius. A node
+  // at radialDist r has r * arcPerSlot of room to its angular neighbour.
+  const arcPerSlot = sectorWidthRad / N;
+
   const densityProbe = (px, py, selfNode) => {
     let count = 0;
     const r2 = DENSITY_RADIUS * DENSITY_RADIUS;
@@ -1037,7 +1044,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
       cy: node.limbOrigin ? node.limbOrigin.y : trunkBaseY,
       grassY: trunkBaseY,
       rightmostAngle
-    }, densityProbe);
+    }, densityProbe, (node.radialDist || 0) * arcPerSlot);
   });
 
   // 7. Cluster fix: position non-representative twig members by sampling
@@ -1241,7 +1248,7 @@ function computeTrunkSpineGeometry(rootNode) {
  * Compound Bézier where P1 extends along parent exit tangent (~40%)
  * and P2 approaches destination from child heading, with opposite perpendicular offsets.
  */
-function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx, densityProbe) {
+function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx, densityProbe, arcSlotDistance = 0) {
   const x0 = node.x0;
   const y0 = node.y0;
   const x3 = node.x3;
@@ -1292,6 +1299,22 @@ function computeSCurveSpineGeometry(node, parentExitTangent, clampCtx, densityPr
   // offset — and it is applied within the wedge clamp below, so it can never
   // push a twig into a neighbouring subtree.
   let s1 = (seedHash(node.data.id + '_s1') - 0.5) * 2 * flex * L;
+
+  // Scale-invariant cap. Flex as a fraction of branch LENGTH grows with the
+  // canopy, while R_min holds the arc width per angular slot roughly constant
+  // (~clearance) at every scale — so length-to-arc grows as sqrt(N), each
+  // branch sweeps proportionally more neighbouring slots, and with branch
+  // count growing as N the crossing count scales like N^1.5. Capping against
+  // the arc distance to the neighbouring slot takes the sqrt(N) term out:
+  // flex stops growing with the canopy. This is the scale-correct form of the
+  // hand-tuned reduction that cut within-limb crossings 58% at 1,000 nodes.
+  if (arcSlotDistance > 0) {
+    const cap = FLEX_ARC_FRACTION * arcSlotDistance;
+    if (Math.abs(s1) > cap) s1 = Math.sign(s1) * cap;
+    node.arcSlotDistance = arcSlotDistance;
+    node.flexApplied = Math.abs(s1);
+  }
+
   const isTerminal = node.isLeafNode || !node.children || node.children.length === 0;
   if (isTerminal && densityProbe) {
     const mx = (x0 + x3) / 2, my = (y0 + y3) / 2;
