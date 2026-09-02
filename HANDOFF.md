@@ -802,6 +802,32 @@ geometry).
 
 ## 6. Divergences and traps
 
+**Two metrics were silently wrong for a long stretch of this work. Do not
+trust numbers recorded before they were fixed.**
+
+- **`radialDist` was never set on cluster members.** Non-representative twig
+  members skip the position pass (they are placed by `applyTwigMemberSampling`
+  from the representative's finished spine), so their `radialDist` stayed
+  `undefined`/0. More than half of all leaves reported 0. Every metric keyed on
+  radial position — band separation, radial spread, anything comparing a leaf's
+  distance from its polar origin — was computed over a half-zeroed array. This
+  is what hid the fact that the radial bands were never realised in world
+  space: the check said colliding leaves sat 20px apart radially against a
+  nominal 297px band gap, and the 20px was mostly zeros differencing against
+  zeros. Fixed in the same commit as the petiole work.
+- **The intersection metric lacked the junction exemption** the proximity
+  metric already had, so every limb counted as "crossing" the trunk spine at
+  its own attachment point. That inflated cross-limb counts and sent one whole
+  round of diagnosis after a non-existent ordering hole.
+
+Same category, and the lesson generalises: when a metric moves less than a fix
+should have moved it, suspect the metric before adding another constant.
+A third instance — a verification that conditioned on *collision* while trying
+to measure *separation*, which selects for small separation by construction —
+produced a ratio of 0.10–0.26 where the true figure was 0.93.
+
+
+
 **No relaxation pass existed before this session**, despite the original
 project brief describing one (`Tl(root, 50, 30)`, from a diagnosis against
 an older, different, minified bundle than what's in this `src/` — that
