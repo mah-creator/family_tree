@@ -225,6 +225,18 @@ function findDepth1Ancestor(node) {
 }
 
 /**
+ * The trunk-attached subtree a node belongs to: walk up until the parent is a
+ * spine node (trunk lineage) or the root. This is the unit the planarity
+ * ordering works over — findDepth1Ancestor only sees the first generation and
+ * lumps every trunk-node subtree together under the trunk itself.
+ */
+function findAttachUnit(node, root) {
+  let n = node;
+  while (n.parent && n.parent !== root && !n.parent.data.isTrunkLineage) n = n.parent;
+  return n;
+}
+
+/**
  * Shifts every leaf angle in `node`'s subtree by `delta`, keeping the
  * subtree's internal spacing and order intact.
  */
@@ -246,9 +258,16 @@ function shiftSubtreeAngles(node, delta) {
  */
 function constrainJunctionTurning(root) {
   let shifted = 0;
-  const walk = (node, incomingHeading, constrain) => {
-    const kids = node.children || [];
-    kids.forEach(child => {
+  // A node hanging off the SPINE (root or any trunk-lineage node) is a
+  // trunk-attached unit. Those leave the vertical trunk at deliberately wide
+  // angles — that is fixes 1 and 2 working — so they are exempt; constraining
+  // them against the trunk's vertical heading pins every unit into a cone
+  // about vertical and lifts the canopy off the grass. Everything BELOW a unit
+  // is constrained normally, which is where switchbacks actually occur.
+  const isSpine = n => n === root || !!n.data.isTrunkLineage;
+  const walk = (node, incomingHeading) => {
+    const constrain = !isSpine(node);
+    (node.children || []).forEach(child => {
       if (child.targetAngle === undefined) return;
       if (constrain) {
         const dev = normalizeSignedAngle(child.targetAngle - incomingHeading);
@@ -260,16 +279,10 @@ function constrainJunctionTurning(root) {
           shifted++;
         }
       }
-      // The child's own heading is the direction it now travels.
-      walk(child, child.targetAngle, true);
+      walk(child, child.targetAngle);
     });
   };
-  // Depth-1 limbs are exempt: they leave the trunk at deliberately wide
-  // angles (fixes 1 and 2), and constraining them against the trunk's
-  // vertical heading pinned every limb into a +/-70 deg cone about vertical,
-  // undoing the below-horizontal reach and lifting the canopy off the grass
-  // (lowestLeafFrac 0.066 -> 0.292). The switchbacks were all deeper anyway.
-  walk(root, -Math.PI / 2, false);
+  walk(root, -Math.PI / 2);
   return shifted;
 }
 
@@ -299,14 +312,30 @@ function constrainJunctionTurning(root) {
  * position; angles are then assigned by index as before, keeping every
  * subtree's range contiguous.
  */
-function planLimbLayout(root, orderedTwigs) {
-  const depth1 = root.children || [];
-  const trunkLimbs = depth1.filter(n => n.data.isTrunkLineage);
-  const sideLimbs = depth1.filter(n => !n.data.isTrunkLineage);
+function planLimbLayout(root, orderedTwigs, trunkGeom) {
+  // Every subtree hanging off the trunk chain is a unit, not just the ones at
+  // depth 1. The trunk is a spine 8 generations deep on the 1,000-person set,
+  // and each of its nodes carries side subtrees at its own height; those were
+  // allocated angular ranges inside the trunk's block while their ORIGINS
+  // interleaved with the depth-1 limbs' attachment heights. Rays from
+  // different origins with disjoint ranges can still cross, so every one of
+  // the 241 cross-limb intersections at 1,000 nodes involved the trunk, and
+  // side-limb against side-limb was zero. Ordering only at depth 1 left those
+  // attachment points outside the rule; promoting them closes the hole.
+  const units = [];
+  root.descendants().forEach(n => {
+    if (!n.data.isTrunkLineage && n !== root) return; // only spine nodes carry units
+    (n.children || []).forEach(c => {
+      if (c.data.isTrunkLineage) return; // the spine continues, not a unit
+      c.attachSpineDepth = n.depth;
+      c.isDepth1Unit = (n === root);
+      units.push(c);
+    });
+  });
 
   const twigsByLimb = new Map();
   orderedTwigs.forEach(t => {
-    const limb = findDepth1Ancestor(t.representative);
+    const limb = findAttachUnit(t.representative, root);
     if (!twigsByLimb.has(limb)) twigsByLimb.set(limb, []);
     twigsByLimb.get(limb).push(t);
   });
@@ -317,7 +346,7 @@ function planLimbLayout(root, orderedTwigs) {
   // Balance the two halves by leaf count so angular space is shared fairly
   const right = [], left = [];
   let rw = 0, lw = 0;
-  sideLimbs.slice().sort(bySize).forEach(limb => {
+  units.slice().sort(bySize).forEach(limb => {
     const w = limb.subtreeSize || 1;
     if (rw <= lw) { right.push(limb); rw += w; } else { left.push(limb); lw += w; }
   });
@@ -333,6 +362,34 @@ function planLimbLayout(root, orderedTwigs) {
   right.sort(bySizeAsc);
   left.sort(bySizeAsc);
 
+  // Depth-1 units are spread along the trunk column by ATTACH_FRAC; units on
+  // deeper spine nodes sit at that node's own height. Both are expressed as a
+  // height above the trunk base so they can be ordered against each other.
+  const { rootTrunkLength, trunkChainStep, columnHeight } = trunkGeom;
+  const assignHeights = arr => {
+    const d1 = arr.filter(u => u.isDepth1Unit);
+    const denom = Math.max(1, d1.length - 1);
+    d1.forEach((u, i) => {
+      u.plannedD1Rank = i;
+      u.plannedD1Denom = denom;
+    });
+    arr.forEach(u => {
+      u.attachHeight = u.isDepth1Unit
+        ? columnHeight * (ATTACH_FRAC_MIN +
+            (u.plannedD1Rank / Math.max(1, u.plannedD1Denom)) * (ATTACH_FRAC_MAX - ATTACH_FRAC_MIN))
+        : rootTrunkLength + u.attachSpineDepth * trunkChainStep * 0.9;
+    });
+  };
+  assignHeights(right);
+  assignHeights(left);
+
+  // THE RULE, now over every trunk-attached unit rather than depth-1 only:
+  // lower attachment => range further from vertical.
+  const byHeightAsc = (a, b) => a.attachHeight - b.attachHeight ||
+    (a.data.id < b.data.id ? -1 : 1);
+  right.sort(byHeightAsc);
+  left.sort(byHeightAsc);
+
   // The two halves get staggered bands so no left limb attaches at exactly the
   // same height as a right one. Sharing a height re-creates fix 1's original
   // single-origin defect locally: limbs from both halves plus the trunk all
@@ -341,27 +398,32 @@ function planLimbLayout(root, orderedTwigs) {
   // is a half-step, so it can never reorder limbs within a half and break the
   // planarity rule.
   const span = ATTACH_FRAC_MAX - ATTACH_FRAC_MIN;
-  const assignFracs = (arr, half, lowShift, highShift) => arr.forEach((limb, i) => {
-    const denom = Math.max(1, arr.length - 1);
+  const assignFracs = (arr, half, lowShift, highShift) => {
+    const d1 = arr.filter(u => u.isDepth1Unit);
+    const denom = Math.max(1, d1.length - 1);
     const lo = ATTACH_FRAC_MIN + lowShift;
     const hi = ATTACH_FRAC_MAX - highShift;
-    limb.plannedAttachFrac = arr.length === 1 ? hi : lo + (i / denom) * (hi - lo);
-    limb.plannedHalf = half;
-    limb.plannedRank = i;
-  });
+    let i = 0;
+    arr.forEach(limb => {
+      limb.plannedHalf = half;
+      if (limb.isDepth1Unit) {
+        limb.plannedAttachFrac = d1.length === 1 ? hi : lo + (i / denom) * (hi - lo);
+        limb.plannedRank = i;
+        i++;
+      }
+      // Deeper units keep their spine node's own position as their origin —
+      // assignLimbAttachments only places depth-1 units on the column.
+    });
+  };
   const stagger = span / 6;
   assignFracs(right, 'right', 0, stagger);
   assignFracs(left, 'left', stagger, 0);
-  trunkLimbs.forEach(limb => {
-    limb.plannedAttachFrac = ATTACH_FRAC_MAX;
-    limb.plannedHalf = 'center';
-    limb.plannedRank = 0;
-  });
 
-  // Sector runs rightmost -> vertical -> leftmost. Right half most-lateral
-  // first; trunk occupies the vertical middle; left half runs back outward,
-  // so its nearest-vertical (highest) limb comes first.
-  const sequence = [...right, ...trunkLimbs, ...left.slice().reverse()];
+  // Sector runs rightmost -> vertical -> leftmost: right half most-lateral
+  // (lowest attachment) first, left half running back outward so its
+  // nearest-vertical unit comes first. The spine itself has no block of its
+  // own any more — its subtrees are units in these two halves.
+  const sequence = [...right, ...left.slice().reverse()];
 
   const reordered = [];
   sequence.forEach(limb => {
@@ -370,7 +432,7 @@ function planLimbLayout(root, orderedTwigs) {
   // Any twig whose limb somehow went unlisted keeps its original position
   orderedTwigs.forEach(t => { if (!reordered.includes(t)) reordered.push(t); });
 
-  return { orderedTwigs: reordered, sequence, right, left, trunkLimbs };
+  return { orderedTwigs: reordered, sequence, right, left, units };
 }
 
 /**
@@ -385,11 +447,14 @@ function verifyLimbOrdering(plan, trunkBaseY) {
     for (let i = 0; i < limbs.length; i++) {
       for (let j = i + 1; j < limbs.length; j++) {
         const a = limbs[i], b = limbs[j];
-        if (a.limbOrigin === undefined || b.limbOrigin === undefined) continue;
-        if (!a.limbOrigin || !b.limbOrigin) continue;
-        const aLower = a.limbOrigin.y > b.limbOrigin.y;
+        // attachHeight, not limbOrigin: units on deeper spine nodes have no
+        // limbOrigin of their own (they inherit their spine node's), so the
+        // old check silently skipped exactly the units this rule was extended
+        // to cover.
+        if (a.attachHeight === undefined || b.attachHeight === undefined) continue;
+        if (a.attachHeight === b.attachHeight) continue;
+        const aLower = a.attachHeight < b.attachHeight;
         const aWider = Math.abs(a.targetAngle + Math.PI / 2) > Math.abs(b.targetAngle + Math.PI / 2);
-        if (a.limbOrigin.y === b.limbOrigin.y) continue;
         if (aLower !== aWider) violations++;
       }
     }
@@ -451,7 +516,13 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // Planarity by nested ordering: reorder limb blocks so lower attachments own
   // more-lateral angular ranges (see planLimbLayout). Twig order within a limb
   // — and therefore every subtree's contiguity — is preserved.
-  const limbPlan = planLimbLayout(root, collectedTwigs);
+  const maxTrunkDepthForPlan = Math.max(0, ...root.descendants()
+    .filter(n => n.data.isTrunkLineage).map(n => n.depth));
+  const limbPlan = planLimbLayout(root, collectedTwigs, {
+    rootTrunkLength,
+    trunkChainStep,
+    columnHeight: rootTrunkLength + maxTrunkDepthForPlan * trunkChainStep * 0.9
+  });
   const orderedTwigs = limbPlan.orderedTwigs;
   const N = orderedTwigs.length || 1;
 

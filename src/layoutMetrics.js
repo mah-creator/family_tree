@@ -280,11 +280,13 @@ export function computeLayoutMetrics(layoutResult) {
   descendants.forEach(node => {
     const p = node.parent;
     if (!p || p.exitTangent === undefined || !node.p0 || !node.p3) return;
-    // Depth-1 limbs are excluded: they leave the vertical trunk at
-    // deliberately wide angles, so a large turn there is the intended
-    // attachment rather than a doubling-back. They are exempt from the
-    // constraint too, for the same reason.
+    // Trunk-attached units are excluded — a node whose parent is the root or
+    // any spine node leaves the vertical trunk at a deliberately wide angle,
+    // so a large turn there is the intended attachment, not a doubling-back.
+    // Matches the exemption in constrainJunctionTurning; testing only
+    // depth <= 1 missed the units hanging off deeper spine nodes.
     if (node.depth <= 1) return;
+    if (p === root || p.data.isTrunkLineage) return;
     const chord = Math.atan2(node.p3.y - node.p0.y, node.p3.x - node.p0.x);
     let d = chord - p.exitTangent;
     while (d > Math.PI) d -= 2 * Math.PI;
