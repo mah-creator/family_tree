@@ -1,6 +1,7 @@
 import * as d3 from 'd3';
 import {
-  LEAF_HEIGHT, TWIG_MIN_SPACING_PX, TWIG_ANGULAR_CLEARANCE
+  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_CROSS_EXTENT,
+  PETIOLE_ANGLE_MIN, PETIOLE_ANGLE_MAX, PETIOLE_LEN_FRAC
 } from './leafGeometry.js';
 
 /**
@@ -597,7 +598,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // N is twig count, not leaf count — a twig with alternating clustered
   // members is wider than one leaf. Clearance and leaf size live in
   // leafGeometry.js, so scaling the leaf widens the radius.
-  const R_min = (TWIG_ANGULAR_CLEARANCE * (N / bandCount)) / (sectorWidthRad * radialBands[0]);
+  const R_min = (TWIG_CROSS_EXTENT * (N / bandCount)) / (sectorWidthRad * radialBands[0]);
 
   // R_min IS the radius at which the tightest band clears, so the radius is
   // R_min plus a margin, rather than the old "divide by 0.74 a second time
@@ -1120,16 +1121,27 @@ function applyTwigMemberSampling(twigs, grassClampY) {
       const s = sampled[i];
       const isTip = i === members.length - 1;
       const sign = (i % 2 === 0) ? 1 : -1;
-      const nudgeFrac = 0.35 + seedHash(member.data.id + '_twigSide') * 0.25; // 0.35-0.6 of leaf height
-      const nudgePx = isTip ? 0 : nudgeFrac * TWIG_LEAF_HEIGHT_PX;
-      const nx = Math.cos(s.tangent + Math.PI / 2);
-      const ny = Math.sin(s.tangent + Math.PI / 2);
-      member.x3 = s.x + nx * nudgePx * sign;
-      // Same grass-line ceiling the representative's own placement enforces
-      // (treeLayout.js's leaf-placement block) — an S-curve's droop/bulge can
-      // otherwise carry an intermediate sample below the clamped tip.
-      member.y3 = Math.min(s.y + ny * nudgePx * sign, grassClampY);
-      member.exitTangent = s.tangent;
+
+      // Petiole attachment. Members used to be rotated to the twig tangent and
+      // pushed perpendicular off it, so they lay PARALLEL along the branch
+      // rather than growing out of it. The leaf path runs base (0,0) to tip
+      // (LEAF_WIDTH, 0), so its base already sits at the local origin and the
+      // perpendicular offset was never needed: the base attaches directly to
+      // the spine, and the leaf leaves at an angle on its own short stem, as
+      // in the reference. The tip member keeps the tangent with no petiole
+      // angle — botanically right, and what the poster shows.
+      const petioleAngle = isTip ? 0 :
+        (PETIOLE_ANGLE_MIN + seedHash(member.data.id + '_petiole') *
+          (PETIOLE_ANGLE_MAX - PETIOLE_ANGLE_MIN)) * sign;
+      const dir = s.tangent + petioleAngle;
+      const petioleLen = isTip ? 0 : PETIOLE_LEN_FRAC * LEAF_WIDTH;
+
+      // Spine attachment point (where the petiole meets the branch).
+      member.petioleFrom = { x: s.x, y: Math.min(s.y, grassClampY) };
+      member.x3 = member.petioleFrom.x + Math.cos(dir) * petioleLen;
+      // Same grass-line ceiling the representative's own placement enforces.
+      member.y3 = Math.min(member.petioleFrom.y + Math.sin(dir) * petioleLen, grassClampY);
+      member.exitTangent = dir;
       // LineageTracer reads .x/.y (not .x3/.y3) for its ancestor path — every
       // other node type gets these set inside computeSCurveSpineGeometry /
       // computeTrunkSpineGeometry, which non-representative members skip.

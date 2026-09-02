@@ -211,6 +211,22 @@ function renderTree(treeData) {
       const angleDeg = ((node.exitTangent || 0) * 180) / Math.PI;
       nodeEl = createLeafNode(node, tipX, tipY, angleDeg, true);
       nodeEl.setAttribute('data-depth', node.depth);
+
+      // Petiole: the short stem from the twig spine to the leaf base. Only
+      // cluster members that stand off at an angle have one; the tip leaf
+      // continues the twig directly.
+      if (node.petioleFrom) {
+        const stem = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        stem.setAttribute('x1', node.petioleFrom.x);
+        stem.setAttribute('y1', node.petioleFrom.y);
+        stem.setAttribute('x2', tipX);
+        stem.setAttribute('y2', tipY);
+        stem.setAttribute('stroke', '#4A2E19');
+        stem.setAttribute('stroke-width', Math.max(1, (node.parent && node.parent.tipWidth) || 1.5));
+        stem.setAttribute('stroke-linecap', 'round');
+        stem.setAttribute('class', 'petiole');
+        branchesLayer.appendChild(stem);
+      }
     }
 
     if (nodeEl) {

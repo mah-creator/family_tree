@@ -9,7 +9,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { buildBotanicalLayout } from '../src/treeLayout.js';
 import { computeLayoutMetrics } from '../src/layoutMetrics.js';
-import { LEAF_WIDTH } from '../src/leafGeometry.js';
+import { LEAF_WIDTH, TWIG_MIN_SPACING_PX } from '../src/leafGeometry.js';
 
 const OPTS = { rootTrunkLength: 460, trunkChainStep: 480, rootBaseWidth: 56 };
 
@@ -62,8 +62,12 @@ for (const file of ['tree.json', 'tree_1000.json']) {
     `${m.limbOrderingViolations} violations`);
   check('no junction switchbacks past 90 deg', m.junctionTurningOver90 === 0,
     `max ${m.junctionTurningMaxDeg} deg`);
-  check('twig cluster spacing above floor', m.minTwigMemberSpacingPx === null || m.minTwigMemberSpacingPx >= 55,
-    `${m.minTwigMemberSpacingPx}px`);
+  // Compare against the DERIVED floor, not a copied number: the floor is now
+  // computed from the petiole geometry (leaf footprint along the twig axis)
+  // and moved 58 -> 39 when leaves stopped lying parallel along the twig.
+  check('twig cluster spacing above floor',
+    m.minTwigMemberSpacingPx === null || m.minTwigMemberSpacingPx >= TWIG_MIN_SPACING_PX,
+    `${m.minTwigMemberSpacingPx}px vs floor ${TWIG_MIN_SPACING_PX}px`);
   // Cross-limb crossings are structurally forbidden by the nested ordering.
   // A handful survive at 1,000 nodes; a jump means the ordering broke again.
   check('cross-limb crossings near zero', m.crossLimbIntersections <= (big ? 20 : 2),
