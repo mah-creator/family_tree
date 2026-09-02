@@ -240,10 +240,23 @@ export function computeLayoutMetrics(layoutResult) {
       // Siblings share p0 exactly; their first segments meet there by
       // construction, which is a junction, not a crossing.
       const sib = A.node.parent === B.node.parent;
+      // Same junction exemption the proximity measure uses, and for the same
+      // reason: a branch meeting another near where either of them STARTS is
+      // structure, not a crossing. Without it, every limb was counted as
+      // crossing the trunk spine at its own attachment point — which is
+      // unavoidable, since the limb originates on the trunk. That accounted
+      // for all 9 "cross-limb" intersections on tree.json (each one landing
+      // exactly at the limb's own attachment height).
+      const nearStart = (p) =>
+        Math.hypot(p.x - A.pts[0].x, p.y - A.pts[0].y) < JUNCTION_RADIUS ||
+        Math.hypot(p.x - B.pts[0].x, p.y - B.pts[0].y) < JUNCTION_RADIUS;
       let hit = false;
       for (let m = sib ? 1 : 0; m < A.pts.length - 1 && !hit; m++) {
         for (let n = sib ? 1 : 0; n < B.pts.length - 1; n++) {
-          if (segsIntersect(A.pts[m], A.pts[m + 1], B.pts[n], B.pts[n + 1])) { hit = true; break; }
+          if (segsIntersect(A.pts[m], A.pts[m + 1], B.pts[n], B.pts[n + 1])) {
+            if (nearStart(A.pts[m])) continue;
+            hit = true; break;
+          }
         }
       }
       if (hit) {
