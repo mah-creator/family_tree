@@ -1,6 +1,6 @@
 import * as d3 from 'd3';
 import {
-  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_CROSS_EXTENT,
+  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_SLOT_MARGIN,
   PETIOLE_ANGLE_MIN, PETIOLE_ANGLE_MAX, PETIOLE_LEN_FRAC
 } from './leafGeometry.js';
 
@@ -59,6 +59,39 @@ const TWIG_T_BY_COUNT = { 1: [1.0], 2: [0.7, 1.0], 3: [0.45, 0.72, 1.0] };
  * The along-twig spacing floor still applies — longer clusters simply make
  * the twig longer (see the length scaling in the leaf-placement block).
  */
+/**
+ * Signed petiole angle for the i-th member of a k-member twig. Single source
+ * of truth: applyTwigMemberSampling places leaves with this, and
+ * twigCrossExtent predicts their spread with it before any geometry exists.
+ */
+function memberPetioleAngle(member, i, count) {
+  if (i === count - 1) return 0; // tip leaf continues the twig
+  const sign = (i % 2 === 0) ? 1 : -1;
+  return (PETIOLE_ANGLE_MIN +
+    seedHash(member.data.id + '_petiole') * (PETIOLE_ANGLE_MAX - PETIOLE_ANGLE_MIN)) * sign;
+}
+
+/**
+ * How wide this twig actually is across its own axis, from its own members'
+ * petiole angles — not a global constant standing in for a per-twig quantity.
+ * A single-leaf twig spans about one leaf height; a six-leaf twig with leaves
+ * alternating at 50-65 deg spans well over twice that. Sizing every angular
+ * slot at one clearance meant narrow twigs wasted room while wide ones
+ * overflowed, which is where the leaf collisions came from.
+ */
+function twigCrossExtent(members) {
+  let mn = 0, mx = 0;
+  members.forEach((m, i) => {
+    const a = memberPetioleAngle(m, i, members.length);
+    const petiole = a === 0 ? 0 : PETIOLE_LEN_FRAC * LEAF_WIDTH;
+    const reach = (petiole + LEAF_WIDTH) * Math.sin(a);
+    const half = (LEAF_HEIGHT / 2) * Math.cos(a);
+    mx = Math.max(mx, reach + half);
+    mn = Math.min(mn, reach - half);
+  });
+  return mx - mn;
+}
+
 function twigTValues(k) {
   if (TWIG_T_BY_COUNT[k]) return TWIG_T_BY_COUNT[k];
   const tMin = Math.max(0.25, 1 - (k - 1) * 0.22);
@@ -598,7 +631,23 @@ export function buildBotanicalLayout(treeData, options = {}) {
   // N is twig count, not leaf count — a twig with alternating clustered
   // members is wider than one leaf. Clearance and leaf size live in
   // leafGeometry.js, so scaling the leaf widens the radius.
-  const R_min = (TWIG_CROSS_EXTENT * (N / bandCount)) / (sectorWidthRad * radialBands[0]);
+  // Variable-width angular slots. Every twig used to get an identical slot
+  // sized at one clearance constant, while measured extents ran median 41-88
+  // and max ~160: narrow twigs wasted room, wide ones overflowed, and the
+  // overflow was the leaf-collision source. Each twig now claims arc
+  // proportional to its OWN extent, so none is under-allocated and none
+  // hoards. Because R_min sums actual extents rather than count x p75, it
+  // lands near or below the flat-clearance value despite fixing the outliers.
+  // Ordering is untouched — only slot widths change — so contiguous subtree
+  // ranges, planarity and crossings are unaffected.
+  const twigSlotWidths = orderedTwigs.map(t => twigCrossExtent(t.members) + TWIG_SLOT_MARGIN);
+  const twigSlotTotal = twigSlotWidths.reduce((s, w) => s + w, 0) || 1;
+  const R_min = twigSlotTotal / (sectorWidthRad * radialBands[0] * bandCount);
+  const twigSlotOffsets = [];
+  {
+    let acc = 0;
+    for (let i = 0; i < twigSlotWidths.length; i++) { twigSlotOffsets.push(acc); acc += twigSlotWidths[i]; }
+  }
 
   // R_min IS the radius at which the tightest band clears, so the radius is
   // R_min plus a margin, rather than the old "divide by 0.74 a second time
@@ -653,8 +702,9 @@ export function buildBotanicalLayout(treeData, options = {}) {
   orderedTwigs.forEach((twig, idx) => {
     const repNode = twig.representative;
 
-    // Exact angular position across the sector (Right to Left)
-    const t = (idx + 0.5) / N;
+    // Angular position by cumulative slot width, not uniform index spacing:
+    // each twig sits at the centre of its own arc share (Right to Left).
+    const t = (twigSlotOffsets[idx] + twigSlotWidths[idx] / 2) / twigSlotTotal;
     const baseAngle = rightmostAngle - t * sectorWidthRad;
 
     // Part B - Step 11: Irregular Silhouette Noise (±15%)
@@ -1068,6 +1118,7 @@ export function buildBotanicalLayout(treeData, options = {}) {
     baseCanopyRadius: Math.round(baseCanopyRadius),
     globalStep: Math.round(globalStep),
     bandCount,
+    twigSlotWidths,
     bindingConstraint,
     maxPerTwig,
     angularRadius: Math.round(angularRadius),
@@ -1142,6 +1193,15 @@ function applyTwigMemberSampling(twigs, grassClampY) {
       // Same grass-line ceiling the representative's own placement enforces.
       member.y3 = Math.min(member.petioleFrom.y + Math.sin(dir) * petioleLen, grassClampY);
       member.exitTangent = dir;
+      // Cluster members skip the position pass, so radialDist was never set on
+      // them — more than half of all leaves reported 0, which silently
+      // corrupted any metric keyed on radial position.
+      const mo = member.limbOrigin || rep.limbOrigin;
+      if (mo) {
+        member.radialDist = Math.hypot(
+          (member.x3 - mo.x) / 1.05, (member.y3 - mo.y) / 0.85
+        );
+      }
       // LineageTracer reads .x/.y (not .x3/.y3) for its ancestor path — every
       // other node type gets these set inside computeSCurveSpineGeometry /
       // computeTrunkSpineGeometry, which non-representative members skip.

@@ -80,4 +80,4 @@ export const LEAF_FONT_SCALE = LEAF_SCALE;
  * for about one point of fill. Outliers past it are relaxation's job, not
  * something to size the whole canopy around.
  */
-export const TWIG_CROSS_EXTENT = 100;
+export const TWIG_SLOT_MARGIN = Math.round(LEAF_HEIGHT * 0.4);
