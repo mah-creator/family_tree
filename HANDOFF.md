@@ -83,132 +83,54 @@ an in-app Browser pane with a `preview_start` tool pointed at the
 
 | # | What | Status |
 |---|------|--------|
-| 1 | Single-origin limbs → per-limb trunk attachment | **Landed + visually confirmed** |
-| 2 | Sector widened to 230° | **Landed + visually confirmed** |
-| 3 | Size-aware radial bands + variable depth step | **Untouched** — the twig-indexing rework landed (below) but `idx%3` banding and the uniform `depthRadiusStep` are unchanged; still pending |
-| — | Leaf clusters (twigs of up to 3, shared parent branch) | **Landed + visually confirmed** |
-| 4 | Wedge containment for branch curves | **Untouched** |
-| 5 | Branch-spine relaxation pass | **Untouched** — did not exist at all before this session either (see §6) |
-| 6 | S-curved branches | Pre-existing partial implementation, **not yet re-based** on the fix-1/2/3 layout |
-| 7 | Long sweeping limbs crossing trunk | Pre-existing partial implementation (sweep distance is currently a fixed ~480px, not the brief's ±80px), **not yet re-based** |
-| 8 | Irregular canopy silhouette (seeded noise) | Pre-existing partial implementation, **not yet re-based**, and currently applied to the old single-radius canopy model so its effect will change once fix 3 lands |
-| 9 | Twig-tip droop | Pre-existing partial implementation, looks structurally fine, **not yet re-verified visually** post fix-1 |
+| 1 | Single-origin limbs → per-limb trunk attachment | **Landed.** Extended twice since: up the trunk chain (spine nodes carry their own origins), then to every trunk-attached subtree |
+| 2 | Sector widened to 230° | **Landed** |
+| 3 | Size-aware radial reach | **Landed**, then largely superseded — radial position is now `parentRadial + advance + bandIndex × bandGap`, accumulated per node |
+| — | Leaf clusters (twigs, shared parent branch) | **Landed.** Cluster size scales with tree size (3–6); leaves attach by petiole, not perpendicular offset |
+| 4 | Wedge containment for branch curves | **Landed.** Only `p2` is wedge-clamped; `p1` is governed by a ±50° tangent cone instead (clamping `p1` raised curls) |
+| 5 | Relaxation pass | **NOT STARTED — this is the next task.** See §9 |
+| 6 | S-curved branches | **Landed.** Flex is capped against neighbour arc distance, not branch length |
+| 7 | Long sweeping limbs crossing trunk | **Landed and load-bearing** — see the regression guard in `scripts/check_invariants.mjs`. Disabling it takes tree.json cross-limb crossings 1 → 15 |
+| 8 | Irregular canopy silhouette | **Not started.** Do NOT reach for silhouette noise to fix the visible partings between limbs — see §9 |
+| 9 | Twig-tip droop | **Landed** |
 
-"Landed + visually confirmed" for fix 1 means: this session ran the dev
-server in an in-app browser preview, called a `window.__setView(1800, 1700,
-0.15)` dev hook (see §3) to frame the whole canopy, and took a screenshot.
-The screenshot showed limbs leaving the trunk at four distinct, visibly
-different heights rather than one point, each limb radiating from its own
-origin. A debug-overlay screenshot (toggle `#btn-debug`) additionally showed
-four labelled magenta attachment markers running from 35% to 100% up the
-trunk (`p002@35%`, `p003@57%`, `p005@76%`, `p004@100%`), confirming
-`assignLimbAttachments()` is doing what it claims. Neither screenshot survived
-as a file on disk — they were inline images in that session's chat — so if
-you want to re-confirm, re-run the same steps (§8 gives the exact recipe) and
-compare by eye against what's described here and against the PDF. The overall
-canopy is still a rough fountain/fan shape at this point, not the lumpy
-asymmetric silhouette from the reference — that's expected, since fixes 3
-and 4/5 haven't landed yet.
+Beyond the original nine, these were found and fixed by scale testing, and
+each is a load-bearing invariant now:
 
-Fix 2 ("landed + visually confirmed"): `sectorSpanDeg` changed 155→230 at
-[src/treeLayout.js:77](src/treeLayout.js#L77). A debug-overlay screenshot at
-`window.__setView(1800, 2350, 0.45)` showed the orange dashed sector-boundary
-rays now dipping visibly past horizontal on both the bottom-left and
-bottom-right, with branches leaning down beside the trunk instead of
-stopping dead at horizontal — matches the fix's intent. The green dashed
-grass line showed no leaf crossing it, confirming the existing flat clamp
-(`node.y3 = trunkBaseY - 100` cap, line 208) still holds correctly with the
-wider sector — no change was needed there after all (§4's "Fix 2" section
-originally flagged this as needing review; it turned out fine as-is, since
-the clamp is expressed in absolute world Y tied to `trunkBaseY`, not
-relative to any particular limb origin).
+| What | Why it exists |
+|---|---|
+| Planarity by nested ordering | Cross-limb crossings are structurally forbidden: within each half of the sector, a lower attachment gets a range further from vertical. Asserted by `verifyLimbOrdering` |
+| Junction-turning constraint | Caps subtree range at 70° from the parent's heading; trunk-attached units exempt |
+| Area-based band packing | Band count scales as √(twigs/7), so `R_min` grows as √N rather than linearly |
+| Variable-width angular slots | Each twig claims arc proportional to its own cross-axis extent |
+| Additive band offsets | Bands are a real radial distance, not a multiplier on a per-lineage step |
+| Chord-vs-tangential bound | A node must advance radially by ≥0.85× the tangential distance it travels |
+| Derived canvas | `layoutToFit` runs the layout twice — measure, then size the world to fit |
 
-Leaf clusters ("landed + visually confirmed"): sibling terminal leaves are
-now grouped into twigs of up to 3 that share one physical branch
-(`collectOrderedTwigs`, [src/treeLayout.js:76-156](src/treeLayout.js#L76-L156)) —
-64 twigs from 117 leaves. Only the twig's representative (last member in
-traversal order) gets a real arc-allocated angle/radius and Bezier spine;
-other members are anchored by sampling that finished spine at
-`t=[0.45,0.72,1.0]` (3 members) or `[0.7,1.0]` (2), with a small seeded
-perpendicular nudge alternating sides (`applyTwigMemberSampling`,
-[src/treeLayout.js:453-508](src/treeLayout.js#L453-L508)). Verified via
-screenshot at `window.__setView(2729, 2485, 1.3)` (a 3-member twig): three
-leaves visibly growing off one shared branch, clearly separated, not
-overlapping — matches the reference poster's cluster look. A second
-screenshot at `window.__setView(870, 2400, 1.4)` confirmed the edge-case fix
-below also reads correctly (three leaves near the grass line, distinguishable,
-not flattened into an unreadable clump).
+### Current state (run `node scripts/check_invariants.mjs`, and
+`node scripts/report_metrics.mjs [dataset]`, after every change)
 
-Two real bugs surfaced and were fixed during this pass, both worth knowing
-about if you touch this code:
-1. **Degenerate natural length.** The twig's terminal-segment length is
-   scaled from the "natural" parent→leaf distance the existing (pre-cluster)
-   placement formula produces — but that natural distance can be
-   pathologically short (13.6px observed) when a leaf's own arc-allocated
-   radius happens to nearly coincide with its parent's depth-based radius
-   (two independent formulas; this is exactly the kind of gap "fix 3 proper"
-   — size-aware bands — is meant to close, still pending). Naively scaling a
-   near-zero vector by the required-length ratio produced an 11.95x
-   multiplier and catapulted that twig to the grass clamp. Fixed with a 60px
-   floor on the base length plus a `targetAngle`-derived fallback direction
-   (the near-zero natural vector's *direction* is as unreliable as its
-   magnitude) — see the `MIN_BASE_LEN` block in
-   [src/treeLayout.js:289-336](src/treeLayout.js#L289-L336).
-2. **Grass clamp gap.** The clamp only ever applied to the representative's
-   own tip; non-representative members, sampled from a drooping S-curve,
-   could dip below it (13 leaves observed at `y3 > 2400`). Added the same
-   clamp inside `applyTwigMemberSampling`. That fix then flattened one
-   twig's three members to identical Y (a twig lying almost flat along the
-   grass line), collapsing along-twig spacing to whatever X-spread survived
-   (39.2px — just under the 40px floor). Added a small post-hoc correction:
-   when this flattening is detected, stretch members along X around their
-   shared centroid (Y is already correctly clamped and must not move) — see
-   the `minGap < TWIG_MIN_SPACING_PX` block right after the spacing
-   calculation in `applyTwigMemberSampling`.
+Three datasets. `tree.json` (117 leaves) is the real deliverable — the client
+pitch is 181 people. The other two are scale tests; the client's eventual
+dataset is ~2,000 names, so the 521 and 1,128 columns matter for whether the
+design survives, not for how the demo looks.
 
-### Current headless metrics (run `node scripts/report_metrics.mjs` to
-reproduce — this is the ground truth, re-run it after every change)
+| | tree (117) | tree_1000 (521) | tree_2000 (1128) |
+|---|---|---|---|
+| twigs | 64 | 306 | 531 |
+| bands / gap | 3 / 82 | 7 / 137 | 9 / 164 |
+| R_min / radius | 478 / 669 | 872 / 1221 | 1556 / 2178 |
+| canopy W × H | 3402 × 2672 | 6224 × 5678 | 9022 × 6488 |
+| aspect | 1.27 | 1.10 | 1.39 |
+| canopy fill % | 13.1 | 15.2 | 19.4 |
+| leaf collisions | 12 | 96 | 311 |
+| cross-limb crossings | 0 | 2 | 32 |
+| within-limb crossings | 3 | 40 | 35 |
+| max junction turn | 80.4° | 79.2° | 73.5° |
+| bare trunk fraction | 0.253 | 0.251 | 0.222 |
 
-```json
-{
-  "totalLeaves": 117,
-  "twigCount": 64,
-  "minTwigMemberSpacingPx": 44,
-  "leafPairCollisions": 18,
-  "branchPairCollisions": 50,
-  "R_min": 373,
-  "radiusUsed": 1150,
-  "canopyFillPct": 4.9,
-  "leftFlankFillPct": 0,
-  "rightFlankFillPct": 0
-}
-```
-
-These are post-cluster numbers. For context, the run-up: post-fix-1-only —
-`R_min` 662, `leafPairCollisions` 4, `branchPairCollisions` 90,
-`canopyFillPct` 11.8; post-fix-2 — `R_min` 446, `leafPairCollisions` 24,
-`branchPairCollisions` 102, `canopyFillPct` 8 (see git history on
-`src/treeLayout.js` for exact prior states). `twigCount`/
-`minTwigMemberSpacingPx` are new fields this pass — `totalLeaves` (117) is
-unaffected by clustering (still one SVG leaf element per person), `twigCount`
-(64) is what now drives `R_min` and arc allocation.
-
-`R_min` dropped further (446→373) — expected, since `N` dropped from 117
-leaves to 64 twigs even though the clearance constant grew (34→52) to
-account for a twig cluster being wider than a single leaf; the net effect is
-still a smaller minimum radius requirement. `leafPairCollisions` and
-`branchPairCollisions` both dropped too (24→18, 102→50) — twig-indexed arc
-allocation naturally spreads things out more per slot than leaf-indexed did,
-plus twig-clustered leaf pairs are now correctly exempted from
-`leafPairCollisions` via `clusterId` (they sit close by design). Don't read
-either as "the cluster fix reduced collisions" causally, though — the
-underlying angle-assignment mechanism (still `idx%3` banding, no wedge
-containment) is unchanged; these numbers are the same category of
-not-yet-meaningful churn described under fix 2 above, and fix 4/5 is still
-what actually resolves them. `leftFlankFillPct`/`rightFlankFillPct` are
-still 0% — still expected, since "fix 3 proper" (size-aware bands, variable
-depth step) is what's supposed to target flank density specifically, and it
-hasn't landed yet — see the fix-by-fix table above.
+Zero throughout, at all three scales: `curlCount`, `branchesBelowTrunkBase`,
+`limbOrderingViolations`, `junctionTurningOver90`.
 
 ---
 
@@ -820,11 +742,18 @@ trust numbers recorded before they were fixed.**
   its own attachment point. That inflated cross-limb counts and sent one whole
   round of diagnosis after a non-existent ordering hole.
 
-Same category, and the lesson generalises: when a metric moves less than a fix
-should have moved it, suspect the metric before adding another constant.
-A third instance — a verification that conditioned on *collision* while trying
-to measure *separation*, which selects for small separation by construction —
-produced a ratio of 0.10–0.26 where the true figure was 0.93.
+**STANDING RULE: never verify a fix with a metric conditioned on the failure
+the fix is meant to remove.** The third instance of this was a check that
+measured band *separation* only over *colliding* pairs — and colliding pairs
+are by definition the ones that failed to separate, so the check selected for
+its own null result. It reported 0.10–0.26 where the true figure was ~0.93,
+and nearly sent a working fix to the bin. Measure over the whole population,
+or over a population chosen independently of the outcome.
+
+The related, weaker lesson: when a metric moves less than a fix should have
+moved it, suspect the metric before adding another constant. Three of the
+rounds in this project were spent tuning constants against a measurement that
+could not have responded.
 
 
 
@@ -1041,43 +970,69 @@ something looks wrong.
 
 ## 9. Immediate next action
 
-Fixes 1, 2, and leaf clustering are landed and visually confirmed (§2).
-Fix 3's twig-indexing half landed alongside clustering; its size-aware half
-did not. **Implement the remaining half of fix 3**: size-aware radial
-banding and the variable per-lineage depth step — full detail in §4's
-"Fix 3" section, points 1 and 2 there. Concretely:
+**Fix 5 — the relaxation pass. It is the only one of the original nine never
+started, and everything else is now in place for it.**
 
-1. Replace the `idx % 3` radial-band lookup
-   ([src/treeLayout.js:206-207](src/treeLayout.js#L206-L207)) with one
-   derived from the twig's depth-1 ancestor's `subtreeSize` (large lineages
-   → outer bands, small → inner), keeping light `% 3`-style texture within a
-   lineage so it doesn't look robotically banded.
-2. Replace the fixed `depthRadiusStep`
-   ([src/treeLayout.js:227](src/treeLayout.js#L227), applied at
-   [src/treeLayout.js:334](src/treeLayout.js#L334)) with
-   `step = availableRadialSpan / subtreeHeight` per node (`node.height` after
-   `stratify()`), so short lineages stop near their limb origin instead of
-   being stretched to match deeper siblings.
-3. Once per-lineage radial reach is real, revisit the `baseCanopyRadius`
-   floor (`Math.max(R_min/0.74+180, 1150)`,
-   [src/treeLayout.js:184](src/treeLayout.js#L184)) — deliberately left flat
-   at 1150 until now (§4, §5) since a single global floor may not make sense
-   once reach is computed per-lineage rather than globally.
+Residual it must handle, from the table in §2:
 
-After the change: rebuild, run `node scripts/report_metrics.mjs`, and expect
-`leftFlankFillPct`/`rightFlankFillPct` to *finally* move meaningfully off 0%
-(still 0/0 as of this commit — §2) — this is the first fix that actually
-targets leaf *density* at the flanks, as opposed to just the angular *reach*
-(fix 2) or how leaves share branches (clustering). Watch `twigCount` (should
-stay 64 — this fix doesn't change grouping, only where things end up
-radially) and `minTwigMemberSpacingPx` (should stay ≥40 — if a lineage's
-radial reach changes enough to shrink a twig's natural length back toward
-the degenerate case described in §4/§2, the existing floor-enforcement and
-grass-clamp-interaction fixes should still hold, but re-verify rather than
-assume).
+| | tree (117) | tree_1000 (521) | tree_2000 (1128) |
+|---|---|---|---|
+| leaf collisions | 12 | 96 | 311 |
+| within-limb crossings | 3 | 40 | 35 |
+| cross-limb crossings | 0 | 2 | 32 |
 
-Once that's done, fix 4 (wedge containment) and fix 5 (relaxation pass) are
-next — both still fully unimplemented (§4), and both should meaningfully
-move `leafPairCollisions`/`branchPairCollisions` down for the first time
-(currently 18/50 — §2 — churn from re-indexing through a still-imperfect
-allocation formula, not yet anything approaching a real fix).
+Notes that will save you a round:
+
+- **Do not tune it against 117 alone.** Every constant in this layout that was
+  fitted at 117 leaves broke at 521 or 1,128 — the ±4° wedge margin, the
+  fraction-of-length flex, the flat canopy clearance, the hardcoded canvas.
+  Check all three scales on every change; `scripts/check_invariants.mjs` runs
+  two of them and `report_metrics.mjs` takes a dataset argument.
+- **The residual is mixed, not same-band-only.** At 1,128 both same-band and
+  cross-band pairs appear, so a pass that only nudges within a band will miss
+  most of it.
+- **Cross-limb at 1,128 is 32 and has been creeping** (5 → 20 → 25 → 32 across
+  recent changes) while `limbOrderingViolations` stayed 0 the whole time. That
+  is the same signature as the bands: the guarantee holds in the allocation and
+  not in the drawing. **Diagnose this before relaxing over it** — cross-limb is
+  supposed to be structurally impossible, so relaxation there is mopping up a
+  leak rather than fixing it. The specific check not yet run: for each
+  cross-limb pair, take the intersection point and compute its angle as seen
+  from EACH limb's own origin; if a branch from limb A lands inside limb B's
+  angular range as measured from B's origin, A is intruding and the ordering
+  is not realised in world space.
+
+Then, in order:
+
+1. **Leaf jitter for the radial partings.** The canopy shows visible gaps
+   between limbs — a consequence of strict wedge containment, since disjoint
+   wedges leave real space between subtrees where the poster has merged
+   foliage. **Do not fix this with fix 8's silhouette noise.** Fix it at
+   source: drop inter-limb angular padding to near zero and add seeded angular
+   jitter to LEAF POSITIONS ONLY, never to branch paths. Leaves then interleave
+   across the parting while branches still cannot cross, and
+   `leafPairCollisions` polices the result. Size the jitter against the
+   headroom the bands actually leave, not a fixed fraction of a slot.
+2. **Fix 8, the crown.** Only after the above. Canopy aspect drifts 1.27 →
+   1.10 → 1.39 across the three scales; width and height are tabulated in §2
+   so you can see whether the sector needs narrowing at scale or the crown
+   needs closing over the top.
+3. **Canvas 2D migration.** At 1,000 nodes, pan/zoom runs at roughly 0.5 FPS
+   (~2,000ms per frame). It is NOT the JS — `updateViewport` measures 4.7ms,
+   the quadtree visit 2.1ms. It is browser SVG paint over ~800 branch polygons
+   plus ~550 node groups, and CSS filters were roughly half of it (already
+   removed). The fix is to move branch and leaf geometry to Canvas 2D and keep
+   an SVG or HTML overlay for text and hit-testing at near zoom. Canvas 2D
+   redraws ~1,300 filled paths per frame comfortably, and redrawing on zoom
+   keeps it crisp rather than pixelated. Do this AFTER the tree looks right —
+   the demo has to prove the look first.
+
+**One open question worth resolving early:** band realisation was measured two
+ways and they disagree. Uncontrolled (median radial separation by band-index
+difference) gave 54% at 521 and 93% at 1,128. Controlled per-lineage
+(least-squares slope of `radialDist` on `bandIndex` within each lineage) gave
+114% / 132% / 139% — i.e. bands over-separating, not under. The controlled
+figure is the more trustworthy of the two, since the uncontrolled one is
+polluted by lineage-to-lineage radial variation, but neither has been
+reconciled and the honest answer is that band realisation is not yet a settled
+number. Re-derive it before relying on it.
