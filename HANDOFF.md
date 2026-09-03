@@ -75,9 +75,18 @@ exists, is gitignored — see §6). If you're starting fresh elsewhere, run it
 before anything else.
 
 **Dev server:** `.claude/launch.json` is configured (`npm run dev` on port
-5173) so any harness with dev-server preview tooling (e.g. this session used
-an in-app Browser pane with a `preview_start` tool pointed at the
-`family-tree-dev` config) can bring it up by name.
+5173) so any harness with dev-server preview tooling can bring it up by name.
+
+**Can you see the render? Check before you trust any visual claim.** The
+interactive Browser pane is a Claude Code DESKTOP-app feature and the desktop
+app is Mac/Windows only, so a Linux terminal CLI install has no pane — the
+tools are absent from the harness entirely, which is not the same as a
+localhost restriction. This matters more than it sounds: nearly every real
+defect here was invisible in the metrics and obvious in the render. Leaves
+lying flat along the branch instead of growing out of it passed every numeric
+check. **`scripts/capture.mjs` closes the gap on any platform** — Playwright
+writes PNGs, and your `Read` tool renders them. Full protocol in §8; read it
+before claiming anything looks right.
 
 ### Fix-by-fix status
 
@@ -891,80 +900,98 @@ These worked before this session and must still work after any change:
 
 ## 8. The verification protocol
 
-**The core constraint: whoever (or whatever) is implementing these fixes
-cannot assume it can see the rendered output.** Every real bug found in this
-project so far — before and during this session — was found by looking at
-the render, not by reading the layout math and reasoning about it abstractly.
-Don't trust your own mental model of what a set of Bézier control points and
-polar coordinates will look like; check.
+> **READ THIS BEFORE CLAIMING ANYTHING LOOKS RIGHT.**
+>
+> Almost every real defect in this project was invisible to the metrics and
+> visible in one glance at the render. Leaves lying flat along the branch
+> instead of growing out of it passed *every* numeric check we had. So did the
+> junction switchbacks, the dead-horizontal limbs, and the hairline twigs.
+> **Never write "confirmed", "looks correct", or "verified" about appearance
+> unless you have actually looked at a picture in this turn.** If you cannot
+> look, say so and ask — do not infer appearance from numbers.
 
-**If you have browser preview tooling available** (this session had access
-to an in-app Browser pane with `preview_start`/`navigate`/`computer`
-(screenshot)/`javascript_tool` tools — check whatever harness you're running
-in for something equivalent), use it directly:
+### Can you see the render? Find out first
 
-1. Start the dev server: this repo has `.claude/launch.json` configured with
-   a `family-tree-dev` entry (`npm run dev`, port 5173) — if your tooling
-   reads that file format, start it by name; otherwise run `npm run dev`
-   yourself and point your browser tooling at `http://localhost:5173`.
-2. The initial camera framing only shows a small piece of the tree at
-   default zoom (the `initCamera` scale, `initialScale = 0.42` in
-   [src/camera.js:32](src/camera.js#L32), frames around world coordinates
-   `(1700, 1450)` — reasonable for interactive use but too tight to see the
-   whole canopy in one screenshot). Use the `window.__setView(cx, cy, k)` dev
-   hook added this session ([src/main.js:208-214](src/main.js#L208-L214)) —
-   e.g. `window.__setView(1800, 1700, 0.15)` frames the whole tree; call it
-   via whatever JS-execution tool your browser tooling provides.
-3. Toggle `#btn-debug` (click it, or `document.getElementById('btn-debug').click()`
-   via JS) to overlay: the grass line, the sector boundary rays, the canopy
-   band ellipses, and magenta markers at every depth-1 limb's attachment
-   point (labelled with id and height fraction) plus every trunk-lineage
-   node's position. This overlay is what made fix 1's attachment heights
-   visible at a glance — it should do the same for fix 2's widened sector
-   and fix 3's size-aware bands once those land.
-4. Take a screenshot. Compare by eye against `End-20-12-2024.pdf`.
-5. Read `window.__treeMetrics` (or the browser console, which logs it on
-   every render as `[TREE METRICS] {...}`) for the live numbers, or just run
-   `node scripts/report_metrics.mjs` in a terminal — same numbers, no
-   browser required, since `layoutMetrics.js` runs identically in both
-   places (§5).
+Three tiers, in order of preference. **Tier 2 works everywhere and is the
+one to use unless you know you have a pane.**
 
-**If you don't have browser preview tooling**, fall back to the protocol
-this project has used throughout: stop, and hand back a paste-ready prompt
-for a tool that does have browser control (the project's prior instances
-used one called Antigravity) to run the app and screenshot it. Always
-include, in the prompt you hand back:
+**Tier 1 — interactive browser pane (desktop app only).**
+If your tool list has `preview_start` / `computer` / `navigate`
+(`mcp__Claude_Browser__*`), you can drive a live pane: `preview_start` with the
+`family-tree-dev` config from `.claude/launch.json`, then `window.__setView(...)`
+via `javascript_tool`, then `computer` with `action: "screenshot"`.
+This is a **Claude Code desktop-app** feature, and the desktop app is
+**Mac/Windows only** — so on a Linux terminal CLI install these tools are
+simply absent. Not a localhost restriction: the tools are not in the harness
+at all. Check your own tool list rather than assuming either way.
 
-- The exact URL and any setup steps (`npm run dev`, wait for port 5173).
-- The exact `window.__setView(...)` call(s) to frame what you need to see —
-  don't make the screenshotting tool guess a zoom level.
-- Whether to toggle `#btn-debug` first.
-- Exactly what to compare against in the reference PDF (which structural
-  element — trunk ovals, a specific limb, the flank fill, the silhouette).
-- **The metric numbers you expect**, computed by actually running
-  `node scripts/report_metrics.mjs` against your changes before handing off
-  the prompt — not a guess. This is what lets whoever reads the screenshot
-  tell whether the render agrees with the code's own model of itself, per
-  this project's existing convention. Report these fields specifically:
-  - `leafPairCollisions` and `branchPairCollisions` — **once twig clusters
-    exist, also report `twigPairCollisions` separately from raw
-    `leafPairCollisions`**, since a cluster's own 2–3 leaves sit close
-    together by design and must not be counted as a violation against each
-    other (the `clusterId`-exemption stub in `layoutMetrics.js` — see §3 —
-    handles this once you set `node.clusterId`; until then there's no
-    `twigPairCollisions` field to report, since twigs don't exist).
-  - `R_min` versus `radiusUsed`.
-  - `canopyFillPct` overall, plus `leftFlankFillPct` and `rightFlankFillPct`
-    separately.
+Two quirks if you do have it: batching `__setView` and `screenshot` in one
+`browser_batch` captures the PRE-batch frame, so issue them as separate calls;
+and the pane's rendered viewport can differ from `window.innerWidth`, which is
+why `__setView` measures the SVG's own rect instead.
 
-**Checkpoint cadence** (per the original project brief, still the right
-cadence): screenshot after fix 1 (done — see §2), after fix 2, after fix 3
-(bundled with clusters — see §5 for why), after fixes 4 and 5 together, and
-after fixes 6–9's re-basing is confirmed still correct. Don't batch multiple
-fixes into one unreviewed screenshot request beyond what's listed here —
-each of these fixes changes the render enough that stacking un-reviewed
-changes makes it hard to tell which fix caused which visual problem if
-something looks wrong.
+**Tier 2 — headless capture, then look at the file. Works anywhere.**
+
+```bash
+npm run dev                    # terminal 1
+node scripts/capture.mjs       # terminal 2 — writes shots/*.png
+```
+
+Then **open the PNGs with your `Read` tool**, which renders images. That is
+the whole trick: Playwright draws, `Read` shows you. Verified working —
+Playwright is already a devDependency; the browser binary needs
+`npx playwright install chromium` once (Linux may also want
+`npx playwright install-deps chromium`).
+
+The standing shot set is `fit`, `trunk`, `cluster`, `crown` — whole tree,
+trunk column, a 3x twig crop, and the upper canopy. Add shots rather than
+editing existing ones, or you lose before/after comparability. Arbitrary
+views: `node scripts/capture.mjs --view 2400,1800,0.6`. Other datasets: point
+`src/main.js`'s import at `tree_1000.json`, capture, then **put it back**.
+
+**Tier 3 — ask the human.** If neither works, stop and ask. Do not guess.
+Give a numbered list they can act on without re-deriving anything: exact
+command, exact view, and what to compare against in the reference PDF. Like
+this:
+
+> Please run `npm run dev`, open http://localhost:5173, and capture these
+> four. Paste `window.__setView()` in the browser console to fit the tree; it
+> returns the `cx, cy, k` it chose, so the others can be given relative to it.
+>
+> 1. **Whole tree.** Console: `const v = __setView(); __setView(v.cx, v.cy, v.k*0.9)`.
+>    Compare against the PDF's overall silhouette: is the crown a broad rounded
+>    dome, or a candelabra with visible gaps between limbs?
+> 2. **Trunk column.** `const v = __setView(); const o = __layout.layoutOpts;
+>    __setView(o.trunkCenterX, o.trunkBaseY - o.height*0.22, v.k*2.2)`.
+>    Compare against the poster's trunk: root oval at the base, gold ovals
+>    stacked upward, bare trunk roughly the bottom quarter before the first
+>    limbs.
+> 3. **One leaf cluster, close.** `const v = __setView();
+>    const t = __layout.orderedTwigs.filter(x => x.members.length >= 3)[5];
+>    const r = t.representative;
+>    __setView((r.p0.x + r.x3)/2, (r.p0.y + r.y3)/2, v.k*6)`.
+>    Compare against the poster's twigs: each leaf should leave the branch at
+>    an angle on its own short stem, alternating sides — NOT lying flat along
+>    the branch.
+> 4. **Upper canopy.** `const v = __setView(); const m = __treeMetrics.leafBBox;
+>    __setView((m.minX+m.maxX)/2, m.minY + (m.maxY-m.minY)*0.25, v.k*1.6)`.
+>    Compare against the poster's foliage: is it a continuous mass, or are
+>    there radial partings between limbs?
+
+### What to report alongside any screenshot
+
+Run `node scripts/check_invariants.mjs` (both tracked datasets) and
+`node scripts/report_metrics.mjs [dataset]`. State the numbers you expect
+BEFORE looking, so a disagreement between the render and the code's own model
+is visible rather than rationalised. The metrics that have actually caught
+things: `curlCount`, `branchesBelowTrunkBase`, `junctionTurningOver90`,
+`limbOrderingViolations`, `crossLimbIntersections`, `leafPairCollisions`,
+`canopyFillPct`, `bareTrunkFraction`, `minBranchWidthPx`.
+
+**Checkpoint cadence:** look after every change that moves geometry, and
+before every commit that claims a visual improvement. Do not stack two
+geometry changes behind one screenshot — when it looks wrong you will not know
+which one did it, and this project has burned rounds on exactly that.
 
 ---
 
