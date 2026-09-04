@@ -1,6 +1,6 @@
 import * as d3 from 'd3';
 import {
-  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_SLOT_MARGIN, bandGapFor,
+  LEAF_HEIGHT, LEAF_WIDTH, TWIG_MIN_SPACING_PX, TWIG_SLOT_MARGIN, bandGapFor, CLUSTER_SPACING_PX,
   PETIOLE_ANGLE_MIN, PETIOLE_ANGLE_MAX, PETIOLE_LEN_FRAC
 } from './leafGeometry.js';
 
@@ -92,15 +92,42 @@ function twigCrossExtent(members) {
   return mx - mn;
 }
 
-function twigTValues(k) {
-  if (TWIG_T_BY_COUNT[k]) return TWIG_T_BY_COUNT[k];
-  const tMin = Math.max(0.25, 1 - (k - 1) * 0.22);
+/**
+ * Where a cluster's leaves sit along their shared twig, as t in [0,1].
+ *
+ * Members are anchored at a FIXED pixel spacing back from the tip, not spread
+ * proportionally along the whole twig. Proportional spread meant the cluster
+ * footprint grew with twig length, and twig length grows with the canopy — so
+ * at 1,128 leaves members sat a median 361px apart against a 39px floor, and
+ * the clusters read as scattered single leaves rather than the poster's tight
+ * groups of 3-6. Anchoring from the tip decouples cluster tightness from
+ * canopy scale, and also stabilises the per-twig cross extent that feeds
+ * R_min (twigCrossExtent no longer varies with how long the twig happens to
+ * be).
+ *
+ * TWIG_T_FLOOR keeps the furthest member off the junction; if the twig is too
+ * short to seat the cluster at full spacing the caller lengthens it (see
+ * requiredTwigLength), so the floor is a guard rather than the normal path.
+ */
+function twigTValues(k, twigLength) {
+  if (k <= 1) return [1.0];
+  const L = Math.max(1, twigLength || 0);
+  const stepT = CLUSTER_SPACING_PX / L;
   const out = [];
-  for (let i = 0; i < k; i++) out.push(tMin + (1 - tMin) * (i / (k - 1)));
-  TWIG_T_BY_COUNT[k] = out;
+  for (let i = 0; i < k; i++) {
+    out.push(Math.max(TWIG_T_FLOOR, 1 - (k - 1 - i) * stepT));
+  }
   return out;
 }
+
+/** Twig length needed to seat `k` members at full spacing above the floor. */
+function requiredTwigLength(k) {
+  return k <= 1 ? 0 : ((k - 1) * CLUSTER_SPACING_PX) / (1 - TWIG_T_FLOOR);
+}
 const TWIG_LEAF_HEIGHT_PX = LEAF_HEIGHT;
+// Furthest a cluster member may sit from the twig tip, as t. Guard only —
+// requiredTwigLength normally lengthens the twig instead of compressing.
+const TWIG_T_FLOOR = 0.12;
 // Minimum radial advance of a leaf past its own parent (fix 3).
 const MIN_LEAF_ADVANCE_PX = 70;
 // Floor on canopy radius, independent of R_min, so a very small tree still
@@ -977,9 +1004,10 @@ export function buildBotanicalLayout(treeData, options = {}) {
         let scale = 1 + 0.35 * (memberCount - 1);
 
         if (memberCount > 1) {
-          const tValues = twigTValues(memberCount);
-          const minTGap = minConsecutiveDiff(tValues);
-          const requiredLen = (TWIG_MIN_SPACING_PX / minTGap) * 1.1;
+          // Length needed to seat the cluster at fixed spacing back from the
+          // tip. Previously derived from the proportional t-spread, which made
+          // the requirement grow with the twig rather than with the cluster.
+          const requiredLen = requiredTwigLength(memberCount) * 1.1;
           if (baseLen * scale < requiredLen) scale = requiredLen / baseLen;
         }
 
@@ -1206,7 +1234,8 @@ function applyTwigMemberSampling(twigs, grassClampY) {
     }
     if (!rep.p0 || !rep.p1 || !rep.p2 || !rep.p3) return;
 
-    const tValues = twigTValues(members.length);
+    const twigLen = Math.hypot(rep.p3.x - rep.p0.x, rep.p3.y - rep.p0.y);
+    const tValues = twigTValues(members.length, twigLen);
     const sampled = tValues.map(t => sampleCubicBezier(rep.p0, rep.p1, rep.p2, rep.p3, t));
 
     members.forEach((member, i) => {

@@ -55,6 +55,18 @@ export const TWIG_MIN_SPACING_PX = Math.round(
   LEAF_WIDTH * Math.cos(PETIOLE_ANGLE_MIN) * 0.9
 );
 
+/**
+ * Along-twig spacing between adjacent cluster members, in pixels, measured
+ * back from the twig tip. FIXED, deliberately: the previous scheme spread
+ * members proportionally along the twig, so cluster footprint grew with twig
+ * length and twig length grows with the canopy — median member spacing reached
+ * 361px at 1,128 leaves against a 39px floor, and clusters read as scattered
+ * single leaves instead of the poster's tight groups. Sits just above
+ * TWIG_MIN_SPACING_PX so curvature along the spine cannot push a pair under
+ * the floor.
+ */
+export const CLUSTER_SPACING_PX = Math.round(TWIG_MIN_SPACING_PX * 1.2);
+
 /** Scales the font ramp in leafRenderer so text keeps pace with the leaf. */
 export const LEAF_FONT_SCALE = LEAF_SCALE;
 

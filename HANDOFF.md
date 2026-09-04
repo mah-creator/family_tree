@@ -131,8 +131,8 @@ design survives, not for how the demo looks.
 | R_min / radius | 478 / 669 | 872 / 1221 | 1556 / 2178 |
 | canopy W × H | 3402 × 2672 | 6224 × 5678 | 9022 × 6488 |
 | aspect | 1.27 | 1.10 | 1.39 |
-| canopy fill % | 13.1 | 15.2 | 19.4 |
-| leaf collisions | 12 | 96 | 311 |
+| canopy fill % | 12.0 | 14.1 | 18.6 |
+| leaf collisions | 12 | 66 | 147 |
 | cross-limb crossings | 0 | 2 | 32 |
 | within-limb crossings | 3 | 40 | 35 |
 | max junction turn | 80.4° | 79.2° | 73.5° |
@@ -751,6 +751,22 @@ trust numbers recorded before they were fixed.**
   its own attachment point. That inflated cross-limb counts and sent one whole
   round of diagnosis after a non-existent ordering hole.
 
+**STANDING CHECK: any constant compared against a length that scales with
+canopy size is a scale bug waiting to happen.** Four instances so far, each
+found only at 521 or 1,128 leaves and each invisible at 117:
+
+| Constant | Compared against | Broke because |
+|---|---|---|
+| ±4° wedge margin | angular slot width | slot is 3.6° at 64 twigs, 0.72° at 319 — the pad spanned five slots and containment silently stopped containing |
+| flex as fraction of branch length | arc distance to neighbouring slot | branch length grows as √N while arc per slot is held constant by R_min, so branches swept more slots as the tree grew |
+| 90px junction exemption | branch length | 30% of a branch at 117 leaves, 14% at 1,128 — hid 321 intersections at scale |
+| proportional cluster t-spread | twig length | twig length grows with the canopy, so cluster footprint did too: members ended 361px apart against a 39px floor |
+
+The tell is always the same shape — a fix moves the number far less than it
+should, and the temptation is to add another constant. Before doing that, ask
+what the constant is being compared against and whether that quantity scales
+with N. If it does, express the constant as a fraction of it instead.
+
 **STANDING RULE: never verify a fix with a metric conditioned on the failure
 the fix is meant to remove.** The third instance of this was a check that
 measured band *separation* only over *colliding* pairs — and colliding pairs
@@ -1029,7 +1045,7 @@ Residual it must handle, from the table in §2:
 
 | | tree (117) | tree_1000 (521) | tree_2000 (1128) |
 |---|---|---|---|
-| leaf collisions | 12 | 96 | 311 |
+| leaf collisions | 12 | 66 | 147 |
 | within-limb crossings | 3 | 40 | 35 |
 | cross-limb crossings | 0 | 2 | 32 |
 
@@ -1079,48 +1095,46 @@ Then, in order:
    keeps it crisp rather than pixelated. Do this AFTER the tree looks right —
    the demo has to prove the look first.
 
-### Open item: clusters are far sparser than the poster
+### Open design decision: cluster density cannot reach the poster from siblings alone
 
-Found by looking at a `cluster` crop, not by any metric — every numeric check
-passes. The poster shows tight clusters of 3–6 leaves along each final twig.
-Ours shows one or two leaves per visible stretch of branch. Measured cluster
-sizes:
+The poster shows 3–6 leaves per final twig. We show one to three. Half of this
+was a scale bug and is fixed; the other half is a design ceiling in the data
+shape, and it is a decision rather than a defect.
 
-| | maxPerTwig | size histogram | at cap | single-leaf twigs |
-|---|---|---|---|---|
-| tree (117) | 3 | 1:23, 2:29, 3:12 | 19% | 36% |
-| tree_1000 (521) | 5 | 1:163, 2:90, 3:40, 4:7, 5:6 | 2% | 53% |
-| tree_2000 (1128) | 6 | 1:83, 2:299, 3:149 | **0%** | 16% |
+**Fixed:** cluster members were spread proportionally along the twig, so the
+footprint grew with canopy size — median member spacing was 109 / 212 / 361px
+across the three scales against a 39px floor. Members are now anchored at a
+fixed `CLUSTER_SPACING_PX` back from the tip (`twigTValues(k, twigLength)`),
+which decoupled tightness from scale: spacing is now 51 / 52 / 53px at all
+three sizes, and leaf collisions fell 311 → 147 at 1,128 leaves. Twigs stay
+long; the leaves simply bunch at the end of them, which is the poster's look.
 
-**The cap is fiction.** At 1,128 leaves `maxPerTwig` is 6 and no twig has more
-than 3 members; at 521 only 2% reach the cap and over half the twigs are a
-single leaf. Raising `maxPerTwig` therefore does nothing — it is not the
-binding constraint.
+**The ceiling: parents do not have enough leaf children.** Measured, per
+parent that has any:
 
-Two causes, both worth confirming before changing anything:
+| | mean leaf-children | mean longest contiguous run | parents with ≥4 leaf-children but run ≤2 |
+|---|---|---|---|
+| tree (117) | 2.29 | 2.25 | 0 |
+| tree_1000 (521) | 1.75 | 1.73 | 1 |
+| tree_2000 (1128) | 2.12 | 2.12 | 0 |
 
-1. **Cluster size is limited by sibling availability, not by the cap.**
-   `collectOrderedTwigs` only groups leaf children of the SAME parent, and
-   flushes the pool whenever a non-leaf sibling interrupts. In a deep tree most
-   parents have a mix of leaf and non-leaf children, so the leaf-runs are
-   naturally short. The poster's 3–6 clusters may simply not be reachable by
-   sibling-grouping on this data shape — which would mean clusters need to draw
-   from cousins, or a twig needs to carry leaves from more than one parent.
-   That is a real design question, not a tuning one.
-2. **Members are spread far wider than the floor requires.** Median member
-   spacing is 109 / 212 / 361px across the three scales against a
-   `TWIG_MIN_SPACING_PX` floor of 39. Twig length grows with the canopy
-   (median 321 / 629 / 1151px) while the spacing floor is a fixed pixel value,
-   so leaves scatter along ever-longer twigs instead of bunching. The
-   along-twig `t` values spread across the whole twig by construction, so
-   longer twig = wider scatter, always.
+Note the first two columns are nearly equal, and at 1,128 the two histograms
+are **identical**. That disproves the natural hypothesis that flushing the pool
+on a non-leaf sibling (`collectOrderedTwigs`) is what caps cluster size:
+allowing non-contiguous sibling grouping would gain exactly one twig across all
+three datasets. The real ceiling is fan-out — in a 9-generation tree, a node
+with 2–4 children mostly has children that are themselves parents, so terminal
+siblings are scarce. `maxPerTwig` is correspondingly fiction: it is 6 at 1,128
+leaves and no twig exceeds 3 members.
 
-The second is the more likely cause of the visual sparseness and the cheaper
-fix: cluster members should sit at a fixed spacing near the twig TIP rather
-than spreading proportionally along its whole length. That decouples cluster
-tightness from canopy scale. Check it against `leafPairCollisions` — tightening
-clusters will push that up, and the `clusterId` exemption only covers members
-of the SAME twig.
+**The decision, for later, with the data above attached:** reaching the
+poster's density needs a twig to carry leaves from more than one parent —
+cousins, not just siblings. Sibling grouping cannot get there no matter how it
+is tuned. That is a real design change: cousins under a shared grandparent do
+still occupy one contiguous leaf-index range, so arc allocation and the
+planarity ordering survive it, but the twig would then span two parents'
+subtrees and the lineage-tracing and search paths would need checking. Do not
+implement this as a tuning step — it changes what a twig means.
 
 **One open question worth resolving early:** band realisation was measured two
 ways and they disagree. Uncontrolled (median radial separation by band-index
