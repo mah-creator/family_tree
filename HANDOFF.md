@@ -910,6 +910,31 @@ These worked before this session and must still work after any change:
 > unless you have actually looked at a picture in this turn.** If you cannot
 > look, say so and ask — do not infer appearance from numbers.
 
+### FIRST COLD-START CHECK: can you actually see a picture?
+
+Do this before anything visual, and do not skip it because the previous
+session could see. Tool availability is a property of YOUR harness, not of the
+repo — the same distinction that makes the Browser pane present here and
+absent on a Linux CLI applies to image rendering too, and it has not been
+verified there.
+
+```bash
+npm run dev &                                  # or in another terminal
+node scripts/capture.mjs --shot fit --out shots
+```
+
+Then open `shots/fit.png` with your `Read` tool and **describe what you see**
+— roughly: a brown trunk with gold ovals stacked up it, green leaves on
+branches, a cream background inside a dark red border. If you get an image and
+your description matches, the loop works and you are at tier 2. If you get an
+error, a file path with no picture, or you find yourself guessing from the
+filename, then `capture.mjs` is writing files nobody can look at: **you are at
+tier 3 and must ask the human for every visual check.** Say so explicitly at
+that point rather than proceeding quietly.
+
+(Verified working in the Claude Code desktop app on Windows. NOT yet verified
+in the terminal CLI on Linux — that is exactly what this check settles.)
+
 ### Can you see the render? Find out first
 
 Three tiers, in order of preference. **Tier 2 works everywhere and is the
@@ -1053,6 +1078,49 @@ Then, in order:
    redraws ~1,300 filled paths per frame comfortably, and redrawing on zoom
    keeps it crisp rather than pixelated. Do this AFTER the tree looks right —
    the demo has to prove the look first.
+
+### Open item: clusters are far sparser than the poster
+
+Found by looking at a `cluster` crop, not by any metric — every numeric check
+passes. The poster shows tight clusters of 3–6 leaves along each final twig.
+Ours shows one or two leaves per visible stretch of branch. Measured cluster
+sizes:
+
+| | maxPerTwig | size histogram | at cap | single-leaf twigs |
+|---|---|---|---|---|
+| tree (117) | 3 | 1:23, 2:29, 3:12 | 19% | 36% |
+| tree_1000 (521) | 5 | 1:163, 2:90, 3:40, 4:7, 5:6 | 2% | 53% |
+| tree_2000 (1128) | 6 | 1:83, 2:299, 3:149 | **0%** | 16% |
+
+**The cap is fiction.** At 1,128 leaves `maxPerTwig` is 6 and no twig has more
+than 3 members; at 521 only 2% reach the cap and over half the twigs are a
+single leaf. Raising `maxPerTwig` therefore does nothing — it is not the
+binding constraint.
+
+Two causes, both worth confirming before changing anything:
+
+1. **Cluster size is limited by sibling availability, not by the cap.**
+   `collectOrderedTwigs` only groups leaf children of the SAME parent, and
+   flushes the pool whenever a non-leaf sibling interrupts. In a deep tree most
+   parents have a mix of leaf and non-leaf children, so the leaf-runs are
+   naturally short. The poster's 3–6 clusters may simply not be reachable by
+   sibling-grouping on this data shape — which would mean clusters need to draw
+   from cousins, or a twig needs to carry leaves from more than one parent.
+   That is a real design question, not a tuning one.
+2. **Members are spread far wider than the floor requires.** Median member
+   spacing is 109 / 212 / 361px across the three scales against a
+   `TWIG_MIN_SPACING_PX` floor of 39. Twig length grows with the canopy
+   (median 321 / 629 / 1151px) while the spacing floor is a fixed pixel value,
+   so leaves scatter along ever-longer twigs instead of bunching. The
+   along-twig `t` values spread across the whole twig by construction, so
+   longer twig = wider scatter, always.
+
+The second is the more likely cause of the visual sparseness and the cheaper
+fix: cluster members should sit at a fixed spacing near the twig TIP rather
+than spreading proportionally along its whole length. That decouples cluster
+tightness from canopy scale. Check it against `leafPairCollisions` — tightening
+clusters will push that up, and the `clusterId` exemption only covers members
+of the SAME twig.
 
 **One open question worth resolving early:** band realisation was measured two
 ways and they disagree. Uncontrolled (median radial separation by band-index
